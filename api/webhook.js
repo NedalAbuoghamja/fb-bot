@@ -1,11 +1,17 @@
 const https = require('https');
+const Redis = require('ioredis');
 
+// --- إعدادات البيئة ---
 const PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
-const PAGE_ID = process.env.FB_PAGE_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "my_secret_verify_token_123";
-const REPLY_MESSAGE = "تعالو وزورو رابط متجرنا https://da-vinci.ezone.ly واطلبو مباشرة منه";
-const PRIVATE_MESSAGE_TEXT = "مرحباً بك! يمكنك الطلب ورؤية جميع منتجاتنا مباشرة عبر الرابط التالي: https://da-vinci.ezone.ly";
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const REDIS_URL = process.env.REDIS_URL;
 
+let redis;
+if (REDIS_URL) {
+    redis = new Redis(REDIS_URL);
+}
+
+// دالة إرسال الطلبات لفيسبوك
 function makeRequest(path, method = 'GET', body = null) {
     return new Promise((resolve, reject) => {
         const options = {
@@ -13,36 +19,166 @@ function makeRequest(path, method = 'GET', body = null) {
             port: 443,
             path: `/v20.0${path}`,
             method: method,
-            headers: {
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Content-Type': 'application/json' }
         };
-
         const req = https.request(options, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch (e) {
-                    resolve(data);
-                }
+                try { resolve(JSON.parse(data)); } catch (e) { resolve(data); }
             });
         });
-
         req.on('error', (error) => { reject(error); });
         if (body) req.write(JSON.stringify(body));
         req.end();
     });
 }
 
-export default async function handler(req, res) {
-    // Webhook verification (GET request)
-    if (req.method === 'GET') {
-        const mode = req.query['hub.mode'];
-        const token = req.query['hub.verify_token'];
-        const challenge = req.query['hub.challenge'];
+// إرسال رسالة خاصة لمعلق
+async function sendPrivateReplyToComment(commentId, message) {
+    const path = `/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+    const body = {
+        recipient: { comment_id: commentId },
+        message: { text: message }
+    };
+    return await makeRequest(path, 'POST', body);
+}
 
+// الرد العام على التعليق
+async function replyToCommentPublicly(commentId, message) {
+    const path = `/${commentId}/comments?access_token=${PAGE_ACCESS_TOKEN}`;
+    const body = { message: message };
+    return await makeRequest(path, 'POST', body);
+}
+
+// عمل لايك للتعليق
+async function likeComment(commentId) {
+    const path = `/${commentId}/reactions?access_token=${PAGE_ACCESS_TOKEN}`;
+    const body = { reaction_type: 'LIKE' };
+    return await makeRequest(path, 'POST', body);
+}
+
+// إرسال رسالة عادية في الخاص (PSID)
+async function sendMessage(psid, message) {
+    const path = `/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+    const body = {
+        recipient: { id: psid },
+        message: { text: message }
+    };
+    return await makeRequest(path, 'POST', body);
+}
+
+// معالجة التعليقات
+async function handleComment(event) {
+    const { post_id, comment_id, from, message } = event;
+    if (from.id === process.env.FB_PAGE_ID) return; // تجاهل تعليقات الصفحة نفسها
+
+    console.log(`💬 تعليق جديد من ${from.name}: ${message}`);
+
+    // محاولة جلب معلومات المنتج المرتبط بالمنشور من قاعدة البيانات
+    let productDetails = {
+        price: "150 دينار", // افتراضي
+        link: "https://da-vinci.ezone.ly",
+        name: "منتج رائع من دافينشي"
+    };
+
+    if (redis) {
+        const savedData = await redis.get(`post:${post_id}`);
+        if (savedData) {
+            productDetails = JSON.parse(savedData);
+        }
+    }
+
+    // 1. عمل لايك والرد في العام
+    await likeComment(comment_id);
+    await replyToCommentPublicly(comment_id, `أهلاً بك يا ${from.name} 🌹، تم إرسال التفاصيل كاملة في رسالة خاصة 📩.`);
+
+    // 2. إرسال السعر والتفاصيل في الخاص
+    const privateMsg = `مرحباً بك في DaVinci Store! 🎨
+المنتج الذي سألت عنه متوفر لدينا.
+سعر المنتج: ${productDetails.price}
+رابط المنتج: ${productDetails.link}
+
+⚠️ تنبيه: هذه البضاعة بالحجز وليست متوفرة حالياً في المخزن.
+للحجز المباشر عبر الرسائل دون الدخول للموقع، فقط أرسل كلمة "حجز".`;
+
+    await sendPrivateReplyToComment(comment_id, privateMsg);
+}
+
+// معالجة الرسائل الخاصة (مسار الحجز الذكي)
+async function handleMessage(event) {
+    const senderId = event.sender.id;
+    const messageText = event.message.text.trim();
+
+    if (!redis) {
+        await sendMessage(senderId, "عذراً، النظام غير متصل بقاعدة البيانات حالياً.");
+        return;
+    }
+
+    const stateKey = `user_state:${senderId}`;
+    let currentState = await redis.get(stateKey);
+
+    if (!currentState) {
+        if (messageText === "حجز") {
+            await redis.set(stateKey, "ASKING_NAME");
+            await sendMessage(senderId, "ممتاز! سنقوم بتسجيل حجزك خطوة بخطوة 📝.\nأولاً، أرسل (الاسم الثلاثي):");
+        } else {
+            // رسالة ترحيبية أو تجاهل إذا لم يقل حجز
+            await sendMessage(senderId, "مرحباً بك! إذا كنت تريد تسجيل حجز جديد، أرسل كلمة (حجز).");
+        }
+        return;
+    }
+
+    // آلة الحالات (State Machine)
+    const orderKey = `order:${senderId}`;
+    let currentOrder = await redis.get(orderKey);
+    currentOrder = currentOrder ? JSON.parse(currentOrder) : {};
+
+    switch (currentState) {
+        case "ASKING_NAME":
+            currentOrder.name = messageText;
+            await redis.set(orderKey, JSON.stringify(currentOrder));
+            await redis.set(stateKey, "ASKING_PHONE");
+            await sendMessage(senderId, `أهلاً بك يا ${messageText} 🌹.\nثانياً، أرسل (رقم الهاتف):`);
+            break;
+
+        case "ASKING_PHONE":
+            currentOrder.phone = messageText;
+            await redis.set(orderKey, JSON.stringify(currentOrder));
+            await redis.set(stateKey, "ASKING_DETAILS");
+            await sendMessage(senderId, "تم تسجيل الرقم.\nثالثاً، أرسل (تفاصيل الطلب: كود المنتج، المقاس، واللون المفضل):");
+            break;
+
+        case "ASKING_DETAILS":
+            currentOrder.details = messageText;
+            await redis.set(orderKey, JSON.stringify(currentOrder));
+            await redis.set(stateKey, "ASKING_LOCATION");
+            await sendMessage(senderId, "رائع.\nأخيراً، أرسل (العنوان بالكامل: المدينة والمنطقة):");
+            break;
+
+        case "ASKING_LOCATION":
+            currentOrder.location = messageText;
+            currentOrder.date = new Date().toISOString();
+            currentOrder.status = "جديد";
+            
+            // حفظ الطلب النهائي في قائمة الطلبات
+            await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify(currentOrder));
+            
+            // إعادة ضبط الحالة
+            await redis.del(stateKey);
+            await redis.del(orderKey);
+
+            await sendMessage(senderId, "🎉 تم تسجيل حجزك بنجاح! سيقوم فريقنا بالتواصل معك قريباً لتأكيد الطلب وترتيب التوصيل. شكراً لثقتك بمتجر DaVinci 🎨.");
+            break;
+    }
+}
+
+module.exports = async (req, res) => {
+    if (req.method === 'GET') {
+        let mode = req.query['hub.mode'];
+        let token = req.query['hub.verify_token'];
+        let challenge = req.query['hub.challenge'];
+        
         if (mode && token) {
             if (mode === 'subscribe' && token === VERIFY_TOKEN) {
                 console.log('WEBHOOK_VERIFIED');
@@ -51,42 +187,28 @@ export default async function handler(req, res) {
                 return res.status(403).send('Forbidden');
             }
         }
-        return res.status(400).send('Bad Request');
+        return res.status(200).send("Hello, this is DaVinci webhook!");
     }
 
-    // Webhook event handling (POST request)
     if (req.method === 'POST') {
-        const body = req.body;
-
+        let body = req.body;
+        
         if (body.object === 'page') {
             for (const entry of body.entry) {
-                const webhookEvent = entry.changes ? entry.changes[0] : null;
+                // 1. التقاط التعليقات
+                if (entry.changes) {
+                    for (const change of entry.changes) {
+                        if (change.field === 'feed' && change.value.item === 'comment' && change.value.verb === 'add') {
+                            await handleComment(change.value);
+                        }
+                    }
+                }
                 
-                if (webhookEvent && webhookEvent.field === 'feed') {
-                    const value = webhookEvent.value;
-                    
-                    if (value.item === 'comment' && value.verb === 'add') {
-                        const commentId = value.comment_id;
-                        const message = value.message;
-                        const senderId = value.from.id;
-
-                        if (senderId !== PAGE_ID) {
-                            console.log(`Received comment from ${value.from.name}: ${message}`);
-
-                            try {
-                                const replyPath = `/${commentId}/comments?message=${encodeURIComponent(REPLY_MESSAGE)}&access_token=${PAGE_ACCESS_TOKEN}`;
-                                await makeRequest(replyPath, 'POST');
-                                
-                                const pmPath = `/${PAGE_ID}/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-                                const pmBody = {
-                                    recipient: { comment_id: commentId },
-                                    message: { text: PRIVATE_MESSAGE_TEXT }
-                                };
-                                await makeRequest(pmPath, 'POST', pmBody);
-                                
-                            } catch (e) {
-                                console.error("Error sending replies:", e);
-                            }
+                // 2. التقاط الرسائل الخاصة
+                if (entry.messaging) {
+                    for (const webhook_event of entry.messaging) {
+                        if (webhook_event.message && webhook_event.message.text && !webhook_event.message.is_echo) {
+                            await handleMessage(webhook_event);
                         }
                     }
                 }
@@ -96,4 +218,6 @@ export default async function handler(req, res) {
             return res.status(404).send('Not Found');
         }
     }
-}
+
+    return res.status(405).send("Method Not Allowed");
+};

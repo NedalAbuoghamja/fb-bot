@@ -1,0 +1,11 @@
+{
+  "name": "fb-vercel-bot",
+  "version": "1.0.0",
+  "main": "api/webhook.js",
+  "scripts": {
+    "start": "node api/webhook.js"
+  },
+  "dependencies": {
+    "ioredis": "^5.10.1"
+  }
+}
