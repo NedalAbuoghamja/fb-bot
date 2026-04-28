@@ -206,6 +206,16 @@ module.exports = async (req, res) => {
                 </a>
 
                 <!-- إعدادات البوت -->
+                <a href="https://nedalabuoghamja.github.io/DaVinci-shipments/" target="_blank" class="card">
+                    <div class="card-icon">📦</div>
+                    <div>
+                        <div class="card-title">منظومة شحن DaVinci</div>
+                        <div class="card-desc">تتبع الشحنات، إدارة كشوفات التوصيل، والربط المباشر مع شركات الشحن المحلية.</div>
+                    </div>
+                    <div class="card-link">فتح المنظومة ⮕</div>
+                </a>
+
+                <!-- إعدادات البوت -->
                 <a href="https://developers.facebook.com/apps/" target="_blank" class="card">
                     <div class="card-icon">🤖</div>
                     <div>
