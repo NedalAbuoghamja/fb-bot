@@ -73,6 +73,9 @@ module.exports = async (req, res) => {
 
                 ordersHTML += `
                 <tr id="row-${key.replace(/:/g, '_')}">
+                    <td>
+                        ${order.img ? `<img src="${order.img}" alt="product" class="order-img" onclick="window.open(this.src)">` : '<div class="no-img">❌</div>'}
+                    </td>
                     <td class="font-medium">${order.name || '-'}</td>
                     <td><a href="tel:${order.phone || ''}" class="phone-link">${order.phone || '-'}</a></td>
                     <td>${order.details || '-'}</td>
@@ -178,6 +181,21 @@ module.exports = async (req, res) => {
                 background-color: #f8fafc;
             }
             .font-medium { font-weight: 600; color: #0f172a; }
+            .order-img {
+                width: 60px;
+                height: 60px;
+                object-fit: cover;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: transform 0.2s;
+                border: 1px solid #e2e8f0;
+            }
+            .order-img:hover { transform: scale(1.1); }
+            .no-img {
+                width: 60px; height: 60px;
+                display: flex; align-items: center; justify-content: center;
+                background: #f1f5f9; border-radius: 8px; color: #94a3b8; font-size: 12px;
+            }
             .phone-link {
                 color: var(--accent);
                 text-decoration: none;
@@ -262,6 +280,7 @@ module.exports = async (req, res) => {
                 <table>
                     <thead>
                         <tr>
+                            <th>صورة المنتج</th>
                             <th>الاسم</th>
                             <th>الهاتف</th>
                             <th>التفاصيل</th>

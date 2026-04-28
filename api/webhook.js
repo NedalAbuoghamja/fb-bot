@@ -127,6 +127,10 @@ https://da-vinci.ezone.ly/products/71723
 
 للحجز الفوري، أرسل كلمة "حجز" هنا في المسنجر وسأقوم بتسجيل طلبك فوراً! 📩`;
 
+    // حفظ صورة المنتج كـ "آخر منتج مهتم به" لربطها بالحجز لاحقاً
+    const productImg = "https://cdn.ezone.ly/Prods/11977/585e05d26c6c4670bdca8359f8b67ca9.jpg";
+    await redis.set(`last_product_img:${senderId}`, productImg, 'EX', 86400); // تنتهي بعد 24 ساعة
+
     await sendPrivateReplyToComment(comment_id, privateMsg);
 }
 
@@ -207,20 +211,31 @@ async function handleMessage(event) {
 
         case "ASKING_LOCATION":
             currentOrder.location = messageText;
-            currentOrder.date = new Date().toISOString();
-            currentOrder.status = "جديد";
             
             // حفظ الطلب النهائي في قائمة الطلبات
-            await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify(currentOrder));
+            const finalOrder = {
+                ...currentOrder,
+                date: new Date().toISOString(),
+                status: 'جديد'
+            };
+            
+            // جلب صورة المنتج إذا كانت محفوظة
+            const lastImg = await redis.get(`last_product_img:${senderId}`);
+            if (lastImg) {
+                finalOrder.img = lastImg;
+            }
+
+            await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify(finalOrder));
             
             // إضافة الطلب إلى سجل الطلبات العام (اختياري لسهولة الجلب)
-            await redis.lpush('all_orders', JSON.stringify(currentOrder));
+            await redis.lpush('all_orders', JSON.stringify(finalOrder));
 
             // إعادة ضبط الحالة
             await redis.del(stateKey);
             await redis.del(orderKey);
+            await redis.del(`last_product_img:${senderId}`);
 
-            await sendMessage(senderId, "🎉 تم تسجيل حجزك بنجاح! سيقوم فريقنا بالتواصل معك قريباً لتأكيد الطلب وترتيب التوصيل. شكراً لثقتك بمتجر DaVinci 🎨.");
+            await sendMessage(senderId, "✅ تم استلام طلبك بنجاح! شكراً لثقتك بـ DaVinci Store. سيتم التواصل معك قريباً لتأكيد التوصيل. 😊");
             break;
         }
     } catch (error) {
