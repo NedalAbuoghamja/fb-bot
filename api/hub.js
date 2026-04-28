@@ -186,13 +186,23 @@ module.exports = async (req, res) => {
                 </a>
 
                 <!-- منظومة الشحن -->
-                <a href="#" class="card">
-                    <div class="card-icon">🚚</div>
+                <a href="https://my.ezone.ly/" target="_blank" class="card">
+                    <div class="card-icon">🚛</div>
                     <div>
-                        <div class="card-title">منظومة الشحن</div>
-                        <div class="card-desc">تتبع الشحنات مع شركات التوصيل، إدارة المناديب، وحساب تكاليف الشحن لكل مدينة.</div>
+                        <div class="card-title">بوابة E-Zone</div>
+                        <div class="card-desc">النظام المركزي لخدمات E-Zone، إدارة الحسابات، ومتابعة العمليات اللوجستية الكبرى.</div>
                     </div>
-                    <div class="card-link">فتح المنظومة ⮕</div>
+                    <div class="card-link">الدخول للبوابة ⮕</div>
+                </a>
+
+                <!-- E-Zone Pay -->
+                <a href="https://my.ezone.ly/ezone-pay/dashboard" target="_blank" class="card">
+                    <div class="card-icon">💳</div>
+                    <div>
+                        <div class="card-title">E-Zone Pay</div>
+                        <div class="card-desc">لوحة تحكم المدفوعات المالية، متابعة الرصيد، والتحويلات المالية الخاصة بالمتجر.</div>
+                    </div>
+                    <div class="card-link">فتح المحفظة ⮕</div>
                 </a>
 
                 <!-- إعدادات البوت -->
