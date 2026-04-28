@@ -49,6 +49,7 @@ function makeRequest(path, method = 'GET', body = null) {
 async function sendPrivateReplyToComment(commentId, message) {
     const path = `/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
     const body = {
+        messaging_type: 'RESPONSE',
         recipient: { comment_id: commentId },
         message: { text: message }
     };
@@ -65,7 +66,7 @@ async function replyToCommentPublicly(commentId, message) {
 // عمل لايك للتعليق
 async function likeComment(commentId) {
     const path = `/${commentId}/reactions?access_token=${PAGE_ACCESS_TOKEN}`;
-    const body = { reaction_type: 'LIKE' };
+    const body = { reaction_type: 'LIKE' }; // جربنا reaction_type، إذا فشل سنحاول إضافة type
     return await makeRequest(path, 'POST', body);
 }
 
@@ -73,6 +74,7 @@ async function likeComment(commentId) {
 async function sendMessage(psid, message) {
     const path = `/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
     const body = {
+        messaging_type: 'RESPONSE',
         recipient: { id: psid },
         message: { text: message }
     };
