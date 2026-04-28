@@ -133,17 +133,12 @@ function isBookingKeyword(text) {
     return keywords.some(k => normalized.includes(k)) || normalized === "حجز";
 }
 
-// معالجة الرسائل الخاصة (مسار الحجز الذكي)
+    // معالجة الرسائل الخاصة (مسار الحجز الذكي)
 async function handleMessage(event) {
     const senderId = event.sender.id;
     if (!event.message || !event.message.text) return;
     
     const messageText = event.message.text.trim();
-
-    // --- اختبار فوري للتأكد من عمل الويب هوك ---
-    console.log(`Attempting to send test message to ${senderId}`);
-    const testResult = await sendMessage(senderId, "✅ استلمت رسالتك: " + messageText); 
-    console.log("Test Message Result:", JSON.stringify(testResult));
 
     try {
         if (!redis) {
