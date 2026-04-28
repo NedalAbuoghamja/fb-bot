@@ -102,9 +102,14 @@ async function handleComment(event) {
         }
     }
 
-    // 1. عمل لايك والرد في العام
-    await likeComment(comment_id);
-    await replyToCommentPublicly(comment_id, `أهلاً بك يا ${from.name} 🌹، تم إرسال التفاصيل كاملة في رسالة خاصة 📩.`);
+    // 1. عمل لايك والرد في العام (مع عزل الأخطاء لضمان عدم توقف الرسالة الخاصة)
+    try {
+        await likeComment(comment_id);
+    } catch (e) { console.error("Like Error:", e); }
+
+    try {
+        await replyToCommentPublicly(comment_id, `أهلاً بك يا ${from.name} 🌹، تم إرسال التفاصيل كاملة في رسالة خاصة 📩.`);
+    } catch (e) { console.error("Public Reply Error:", e); }
 
     // 2. إرسال السعر والتفاصيل في الخاص
     const privateMsg = `مرحباً بك في DaVinci Store! 🎨
@@ -133,7 +138,9 @@ async function handleMessage(event) {
     const messageText = event.message.text.trim();
 
     // --- اختبار فوري للتأكد من عمل الويب هوك ---
-    await sendMessage(senderId, "✅ استلمت رسالتك: " + messageText); 
+    console.log(`Attempting to send test message to ${senderId}`);
+    const testResult = await sendMessage(senderId, "✅ استلمت رسالتك: " + messageText); 
+    console.log("Test Message Result:", JSON.stringify(testResult));
 
     try {
         if (!redis) {
