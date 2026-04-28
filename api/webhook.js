@@ -130,6 +130,9 @@ async function handleMessage(event) {
     
     const messageText = event.message.text.trim();
 
+    // --- اختبار فوري للتأكد من عمل الويب هوك ---
+    await sendMessage(senderId, "✅ استلمت رسالتك: " + messageText); 
+
     try {
         if (!redis) {
             console.error("Redis is not initialized");
@@ -237,6 +240,7 @@ module.exports = async (req, res) => {
     }
 
     if (req.method === 'POST') {
+        console.log("Incoming Webhook Event:", JSON.stringify(req.body));
         let body = req.body;
         
         if (body.object === 'page') {
