@@ -11,15 +11,53 @@ module.exports = async (req, res) => {
         return res.status(500).send("قاعدة البيانات غير متصلة");
     }
 
+    // --- معالجة الطلبات (POST) لعمليات التحديث والحذف ---
+    if (req.method === 'POST') {
+        const { action, orderId, status, name, phone, details, location } = req.body;
+
+        if (action === 'update_status') {
+            const dataStr = await redis.get(orderId);
+            if (dataStr) {
+                const order = JSON.parse(dataStr);
+                order.status = status;
+                await redis.set(orderId, JSON.stringify(order));
+                return res.status(200).json({ success: true });
+            }
+        }
+
+        if (action === 'delete') {
+            await redis.del(orderId);
+            return res.status(200).json({ success: true });
+        }
+
+        if (action === 'edit') {
+            const dataStr = await redis.get(orderId);
+            if (dataStr) {
+                const order = JSON.parse(dataStr);
+                order.name = name;
+                order.phone = phone;
+                order.details = details;
+                order.location = location;
+                await redis.set(orderId, JSON.stringify(order));
+                return res.status(200).json({ success: true });
+            }
+        }
+
+        return res.status(400).json({ error: 'Invalid action' });
+    }
+
+    // --- عرض الصفحة (GET) ---
     // جلب جميع مفاتيح الطلبات
     const keys = await redis.keys('final_order:*');
     
+    // ترتيب المفاتيح حسب الوقت (من الأحدث للأقدم)
+    keys.sort((a, b) => b.split(':')[1].split('_')[0] - a.split(':')[1].split('_')[0]);
+
     let ordersHTML = '';
     
     if (keys.length === 0) {
-        ordersHTML = `<tr><td colspan="5" style="text-align: center; padding: 20px;">لا توجد طلبات حجز حالياً</td></tr>`;
+        ordersHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #6b7280;">لا توجد طلبات حجز حالياً</td></tr>`;
     } else {
-        // جلب تفاصيل كل طلب
         for (const key of keys) {
             const dataStr = await redis.get(key);
             if (dataStr) {
@@ -27,13 +65,31 @@ module.exports = async (req, res) => {
                 const dateObj = new Date(order.date);
                 const dateStr = dateObj.toLocaleDateString('ar-LY') + ' ' + dateObj.toLocaleTimeString('ar-LY');
                 
+                const status = order.status || 'جديد';
+                let statusClass = 'status-new';
+                if (status === 'في الطريق') statusClass = 'status-shipping';
+                if (status === 'وصلت') statusClass = 'status-delivered';
+                if (status === 'ملغي') statusClass = 'status-cancelled';
+
                 ordersHTML += `
-                <tr>
-                    <td>${order.name || '-'}</td>
-                    <td><a href="tel:${order.phone || ''}" style="color: #2563eb;">${order.phone || '-'}</a></td>
+                <tr id="row-${key.replace(/:/g, '_')}">
+                    <td class="font-medium">${order.name || '-'}</td>
+                    <td><a href="tel:${order.phone || ''}" class="phone-link">${order.phone || '-'}</a></td>
                     <td>${order.details || '-'}</td>
                     <td>${order.location || '-'}</td>
-                    <td>${dateStr}</td>
+                    <td>
+                        <select class="status-select ${statusClass}" onchange="updateStatus('${key}', this.value)">
+                            <option value="جديد" ${status === 'جديد' ? 'selected' : ''}>جديد 🆕</option>
+                            <option value="في الطريق" ${status === 'في الطريق' ? 'selected' : ''}>في الطريق 🚚</option>
+                            <option value="وصلت" ${status === 'وصلت' ? 'selected' : ''}>وصلت ✅</option>
+                            <option value="ملغي" ${status === 'ملغي' ? 'selected' : ''}>ملغي ❌</option>
+                        </select>
+                    </td>
+                    <td class="text-sm text-gray-500">${dateStr}</td>
+                    <td class="actions">
+                        <button onclick="editOrder('${key}', ${JSON.stringify(order).replace(/"/g, '&quot;')})" class="btn-edit">تعديل</button>
+                        <button onclick="deleteOrder('${key}')" class="btn-delete">حذف</button>
+                    </td>
                 </tr>`;
             }
         }
@@ -45,32 +101,56 @@ module.exports = async (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>طلبات متجر دافينشي - DaVinci</title>
+        <title>إدارة حجوزات دافينشي - DaVinci</title>
+        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&family=Noto+Kufi+Arabic:wght@400;600&display=swap" rel="stylesheet">
         <style>
+            :root {
+                --primary: #111827;
+                --accent: #2563eb;
+                --bg: #f9fafb;
+                --card: #ffffff;
+                --text: #1f2937;
+            }
             body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f3f4f6;
+                font-family: 'Noto Kufi Arabic', 'Outfit', sans-serif;
+                background-color: var(--bg);
                 margin: 0;
                 padding: 20px;
-                color: #1f2937;
+                color: var(--text);
             }
             .container {
-                max-width: 1000px;
+                max-width: 1200px;
                 margin: 0 auto;
-                background-color: white;
-                border-radius: 10px;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+                background-color: var(--card);
+                border-radius: 16px;
+                box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
                 overflow: hidden;
             }
             .header {
-                background-color: #111827;
+                background: linear-gradient(135deg, #111827 0%, #1f2937 100%);
                 color: white;
-                padding: 20px;
+                padding: 30px 20px;
                 text-align: center;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
             }
             .header h1 {
                 margin: 0;
                 font-size: 24px;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .stats {
+                display: flex;
+                gap: 20px;
+            }
+            .stat-item {
+                background: rgba(255, 255, 255, 0.1);
+                padding: 5px 15px;
+                border-radius: 20px;
+                font-size: 14px;
             }
             .table-container {
                 padding: 20px;
@@ -81,34 +161,114 @@ module.exports = async (req, res) => {
                 border-collapse: collapse;
                 text-align: right;
             }
-            th, td {
-                padding: 12px 15px;
-                border-bottom: 1px solid #e5e7eb;
-            }
             th {
-                background-color: #f9fafb;
+                padding: 15px;
+                background-color: #f8fafc;
                 font-weight: 600;
-                color: #4b5563;
+                color: #64748b;
+                border-bottom: 2px solid #e2e8f0;
+                font-size: 14px;
+            }
+            td {
+                padding: 15px;
+                border-bottom: 1px solid #f1f5f9;
+                vertical-align: middle;
             }
             tr:hover {
-                background-color: #f9fafb;
+                background-color: #f8fafc;
             }
+            .font-medium { font-weight: 600; color: #0f172a; }
+            .phone-link {
+                color: var(--accent);
+                text-decoration: none;
+                font-family: 'Outfit', sans-serif;
+                font-weight: 500;
+            }
+            .status-select {
+                padding: 6px 12px;
+                border-radius: 8px;
+                border: 1px solid #e2e8f0;
+                font-family: inherit;
+                font-size: 13px;
+                cursor: pointer;
+                outline: none;
+                transition: all 0.2s;
+            }
+            .status-new { background-color: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+            .status-shipping { background-color: #fff7ed; color: #9a3412; border-color: #fed7aa; }
+            .status-delivered { background-color: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+            .status-cancelled { background-color: #fef2f2; color: #991b1b; border-color: #fecaca; }
+            
+            .actions {
+                display: flex;
+                gap: 8px;
+            }
+            button {
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: none;
+                font-family: inherit;
+                font-size: 12px;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+            .btn-edit { background-color: #e2e8f0; color: #475569; }
+            .btn-edit:hover { background-color: #cbd5e1; }
+            .btn-delete { background-color: #fee2e2; color: #b91c1c; }
+            .btn-delete:hover { background-color: #fecaca; }
+
+            /* Modal Style */
+            #editModal {
+                display: none;
+                position: fixed;
+                top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5);
+                justify-content: center; align-items: center;
+                z-index: 1000;
+            }
+            .modal-content {
+                background: white;
+                padding: 30px;
+                border-radius: 12px;
+                width: 90%;
+                max-width: 500px;
+                box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2);
+            }
+            .modal-content h2 { margin-top: 0; font-size: 20px; }
+            .form-group { margin-bottom: 15px; }
+            .form-group label { display: block; margin-bottom: 5px; font-size: 14px; color: #64748b; }
+            .form-group input, .form-group textarea {
+                width: 100%;
+                padding: 10px;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                box-sizing: border-box;
+                font-family: inherit;
+            }
+            .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+            .btn-save { background-color: var(--accent); color: white; padding: 10px 20px; font-size: 14px; }
+            .btn-cancel { background-color: #f1f5f9; color: #64748b; padding: 10px 20px; font-size: 14px; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>📦 لوحة تحكم حجوزات DaVinci Store</h1>
+                <h1>📦 لوحة إدارة حجوزات DaVinci Store</h1>
+                <div class="stats">
+                    <div class="stat-item">إجمالي الطلبات: ${keys.length}</div>
+                </div>
             </div>
             <div class="table-container">
                 <table>
                     <thead>
                         <tr>
-                            <th>الاسم الثلاثي</th>
-                            <th>رقم الهاتف</th>
-                            <th>كود المنتج والتفاصيل</th>
-                            <th>العنوان بالكامل</th>
-                            <th>وقت الحجز</th>
+                            <th>الاسم</th>
+                            <th>الهاتف</th>
+                            <th>التفاصيل</th>
+                            <th>العنوان</th>
+                            <th>الحالة</th>
+                            <th>التاريخ</th>
+                            <th>إجراءات</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -117,6 +277,97 @@ module.exports = async (req, res) => {
                 </table>
             </div>
         </div>
+
+        <!-- Modal Edit -->
+        <div id="editModal">
+            <div class="modal-content">
+                <h2>تعديل بيانات الحجز</h2>
+                <input type="hidden" id="editOrderId">
+                <div class="form-group">
+                    <label>الاسم الثلاثي</label>
+                    <input type="text" id="editName">
+                </div>
+                <div class="form-group">
+                    <label>رقم الهاتف</label>
+                    <input type="text" id="editPhone">
+                </div>
+                <div class="form-group">
+                    <label>التفاصيل</label>
+                    <textarea id="editDetails" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>العنوان</label>
+                    <input type="text" id="editLocation">
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-cancel" onclick="closeModal()">إلغاء</button>
+                    <button class="btn-save" onclick="saveEdit()">حفظ التعديلات</button>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            async function updateStatus(orderId, newStatus) {
+                const res = await fetch('/api/orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'update_status', orderId, status: newStatus })
+                });
+                if (res.ok) {
+                    window.location.reload();
+                } else {
+                    alert('فشل في تحديث الحالة');
+                }
+            }
+
+            async function deleteOrder(orderId) {
+                if (!confirm('هل أنت متأكد من حذف هذا الحجز نهائياً؟')) return;
+                const res = await fetch('/api/orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'delete', orderId })
+                });
+                if (res.ok) {
+                    window.location.reload();
+                }
+            }
+
+            function editOrder(orderId, orderData) {
+                document.getElementById('editOrderId').value = orderId;
+                document.getElementById('editName').value = orderData.name || '';
+                document.getElementById('editPhone').value = orderData.phone || '';
+                document.getElementById('editDetails').value = orderData.details || '';
+                document.getElementById('editLocation').value = orderData.location || '';
+                document.getElementById('editModal').style.display = 'flex';
+            }
+
+            function closeModal() {
+                document.getElementById('editModal').style.display = 'none';
+            }
+
+            async function saveEdit() {
+                const orderId = document.getElementById('editOrderId').value;
+                const name = document.getElementById('editName').value;
+                const phone = document.getElementById('editPhone').value;
+                const details = document.getElementById('editDetails').value;
+                const location = document.getElementById('editLocation').value;
+
+                const res = await fetch('/api/orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'edit', 
+                        orderId, 
+                        name, phone, details, location 
+                    })
+                });
+                if (res.ok) {
+                    window.location.reload();
+                } else {
+                    alert('فشل في حفظ التعديلات');
+                }
+            }
+        </script>
     </body>
     </html>
     `;
