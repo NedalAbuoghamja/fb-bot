@@ -18,7 +18,7 @@ function makeRequest(path, method = 'GET', body = null) {
         const options = {
             hostname: 'graph.facebook.com',
             port: 443,
-            path: `/v20.0${path}`,
+            path: `/v25.0${path}`,
             method: method,
             headers: { 
                 'Content-Type': 'application/json',
@@ -136,26 +136,30 @@ async function handleMessage(event) {
             await sendMessage(senderId, "⚠️ النظام غير متصل بقاعدة البيانات حالياً. يرجى إبلاغ الإدارة.");
             return;
         }
-
         const stateKey = `user_state:${senderId}`;
         const orderKey = `order:${senderId}`;
-        
+
         // التحقق من الكلمات المفتاحية بشكل مبسط جداً
         const isBooking = isBookingKeyword(messageText);
         
         if (isBooking) {
-            await redis.set(stateKey, "ASKING_NAME");
-            await redis.del(orderKey);
+            // نرسل الرسالة أولاً لضمان سرعة الرد
             await sendMessage(senderId, "ممتاز! سنقوم بتسجيل حجزك خطوة بخطوة 📝.\nأولاً، أرسل (الاسم الثلاثي):");
+            
+            // ثم نحاول تحديث الحالة في قاعدة البيانات
+            try {
+                await redis.set(stateKey, "ASKING_NAME");
+                await redis.del(orderKey);
+            } catch (e) {
+                console.error("Redis Set Error:", e);
+            }
             return;
         }
 
         let currentState = await redis.get(stateKey);
 
         if (!currentState) {
-            // تجاهل الرسائل التي لا تحتوي على كلمة حجز إذا لم يكن هناك حجز قائم
-            // أو يمكن إرسال رسالة ترحيبية بسيطة
-            if (messageText.length < 20) { // لتجنب الرد على الرسائل الطويلة العشوائية
+            if (messageText.length < 20) {
                  await sendMessage(senderId, "مرحباً بك في DaVinci Store! 🎨\nلتسجيل حجز جديد، أرسل كلمة (حجز).");
             }
             return;
