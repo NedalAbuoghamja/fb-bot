@@ -14,22 +14,33 @@ if (REDIS_URL) {
 // دالة إرسال الطلبات لفيسبوك
 function makeRequest(path, method = 'GET', body = null) {
     return new Promise((resolve, reject) => {
+        const postData = body ? JSON.stringify(body) : '';
         const options = {
             hostname: 'graph.facebook.com',
             port: 443,
             path: `/v20.0${path}`,
             method: method,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
+            }
         };
         const req = https.request(options, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                try { resolve(JSON.parse(data)); } catch (e) { resolve(data); }
+                try { 
+                    const parsed = JSON.parse(data);
+                    if (parsed.error) console.error("FB API Error:", parsed.error);
+                    resolve(parsed); 
+                } catch (e) { resolve(data); }
             });
         });
-        req.on('error', (error) => { reject(error); });
-        if (body) req.write(JSON.stringify(body));
+        req.on('error', (error) => { 
+            console.error("Request Error:", error);
+            reject(error); 
+        });
+        if (body) req.write(postData);
         req.end();
     });
 }
