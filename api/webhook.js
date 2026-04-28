@@ -105,34 +105,48 @@ async function handleComment(event) {
     await sendPrivateReplyToComment(comment_id, privateMsg);
 }
 
+// دالة للتحقق من كلمات الحجز
+function isBookingKeyword(text) {
+    const normalized = text.replace(/[^\u0621-\u064A\s]/g, '').trim(); // إزالة الرموز
+    const keywords = ["حجز", "الحجز", "نبي نحجز", "اريد الحجز", "سجلني", "طلب"];
+    return keywords.some(k => normalized.includes(k)) || normalized === "حجز";
+}
+
 // معالجة الرسائل الخاصة (مسار الحجز الذكي)
 async function handleMessage(event) {
     const senderId = event.sender.id;
+    if (!event.message || !event.message.text) return;
+    
     const messageText = event.message.text.trim();
 
-    if (!redis) {
-        await sendMessage(senderId, "عذراً، النظام غير متصل بقاعدة البيانات حالياً.");
-        return;
-    }
-
-    const stateKey = `user_state:${senderId}`;
-    let currentState = await redis.get(stateKey);
-
-    if (!currentState) {
-        if (messageText === "حجز") {
-            await redis.set(stateKey, "ASKING_NAME");
-            await sendMessage(senderId, "ممتاز! سنقوم بتسجيل حجزك خطوة بخطوة 📝.\nأولاً، أرسل (الاسم الثلاثي):");
-        } else {
-            // رسالة ترحيبية أو تجاهل إذا لم يقل حجز
-            await sendMessage(senderId, "مرحباً بك! إذا كنت تريد تسجيل حجز جديد، أرسل كلمة (حجز).");
+    try {
+        if (!redis) {
+            await sendMessage(senderId, "عذراً، النظام غير متصل بقاعدة البيانات حالياً.");
+            return;
         }
-        return;
-    }
 
-    // آلة الحالات (State Machine)
-    const orderKey = `order:${senderId}`;
-    let currentOrder = await redis.get(orderKey);
-    currentOrder = currentOrder ? JSON.parse(currentOrder) : {};
+        const stateKey = `user_state:${senderId}`;
+        const orderKey = `order:${senderId}`;
+        
+        // التحقق مما إذا كان المستخدم يريد البدء من جديد أو طلب الحجز
+        if (isBookingKeyword(messageText)) {
+            await redis.set(stateKey, "ASKING_NAME");
+            await redis.del(orderKey);
+            await sendMessage(senderId, "ممتاز! سنقوم بتسجيل حجزك خطوة بخطوة 📝.\nأولاً، أرسل (الاسم الثلاثي):");
+            return;
+        }
+
+        let currentState = await redis.get(stateKey);
+
+        if (!currentState) {
+            // رسالة ترحيبية إذا لم يكن هناك حالة نشطة ولم يرسل كلمة حجز
+            await sendMessage(senderId, "مرحباً بك في DaVinci Store! 🎨\nإذا كنت تريد تسجيل حجز جديد، أرسل كلمة (حجز).");
+            return;
+        }
+
+        // آلة الحالات (State Machine)
+        let currentOrder = await redis.get(orderKey);
+        currentOrder = currentOrder ? JSON.parse(currentOrder) : {};
 
     switch (currentState) {
         case "ASKING_NAME":
@@ -164,12 +178,19 @@ async function handleMessage(event) {
             // حفظ الطلب النهائي في قائمة الطلبات
             await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify(currentOrder));
             
+            // إضافة الطلب إلى سجل الطلبات العام (اختياري لسهولة الجلب)
+            await redis.lpush('all_orders', JSON.stringify(currentOrder));
+
             // إعادة ضبط الحالة
             await redis.del(stateKey);
             await redis.del(orderKey);
 
             await sendMessage(senderId, "🎉 تم تسجيل حجزك بنجاح! سيقوم فريقنا بالتواصل معك قريباً لتأكيد الطلب وترتيب التوصيل. شكراً لثقتك بمتجر DaVinci 🎨.");
             break;
+        }
+    } catch (error) {
+        console.error("Error in handleMessage:", error);
+        // لا نرسل رسالة خطأ للمستخدم لتجنب الإزعاج إلا في الحالات الضرورية
     }
 }
 
