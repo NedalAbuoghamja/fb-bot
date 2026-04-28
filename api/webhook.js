@@ -66,7 +66,10 @@ async function replyToCommentPublicly(commentId, message) {
 // عمل لايك للتعليق
 async function likeComment(commentId) {
     const path = `/${commentId}/reactions?access_token=${PAGE_ACCESS_TOKEN}`;
-    const body = { reaction_type: 'LIKE' }; // جربنا reaction_type، إذا فشل سنحاول إضافة type
+    const body = { 
+        reaction_type: 'LIKE',
+        type: 'LIKE' // إضافة type كبديل لضمان التوافق مع v20.0+
+    };
     return await makeRequest(path, 'POST', body);
 }
 
@@ -265,8 +268,10 @@ module.exports = async (req, res) => {
                 
                 // 2. التقاط الرسائل الخاصة
                 if (entry.messaging) {
+                    console.log("🔵 MESSAGING EVENT RECEIVED");
                     for (const webhook_event of entry.messaging) {
                         if (webhook_event.message && webhook_event.message.text && !webhook_event.message.is_echo) {
+                            console.log("📩 Processing Message:", webhook_event.message.text);
                             await handleMessage(webhook_event);
                         }
                     }
