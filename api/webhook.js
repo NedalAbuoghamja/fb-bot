@@ -18,7 +18,7 @@ function makeRequest(path, method = 'GET', body = null) {
         const options = {
             hostname: 'graph.facebook.com',
             port: 443,
-            path: `/v25.0${path}`,
+            path: `/v20.0${path}`,
             method: method,
             headers: { 
                 'Content-Type': 'application/json',
