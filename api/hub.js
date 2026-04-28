@@ -165,7 +165,7 @@ module.exports = async (req, res) => {
 
             <div class="grid">
                 <!-- لوحة الحجوزات -->
-                <a href="/api/orders" class="card">
+                <a href="/api/orders" target="_blank" class="card">
                     <div class="badge">نظام نشط</div>
                     <div class="card-icon">📋</div>
                     <div>
