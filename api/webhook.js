@@ -121,15 +121,18 @@ async function handleMessage(event) {
 
     try {
         if (!redis) {
-            await sendMessage(senderId, "عذراً، النظام غير متصل بقاعدة البيانات حالياً.");
+            console.error("Redis is not initialized");
+            await sendMessage(senderId, "⚠️ النظام غير متصل بقاعدة البيانات حالياً. يرجى إبلاغ الإدارة.");
             return;
         }
 
         const stateKey = `user_state:${senderId}`;
         const orderKey = `order:${senderId}`;
         
-        // التحقق مما إذا كان المستخدم يريد البدء من جديد أو طلب الحجز
-        if (isBookingKeyword(messageText)) {
+        // التحقق من الكلمات المفتاحية بشكل مبسط جداً
+        const isBooking = isBookingKeyword(messageText);
+        
+        if (isBooking) {
             await redis.set(stateKey, "ASKING_NAME");
             await redis.del(orderKey);
             await sendMessage(senderId, "ممتاز! سنقوم بتسجيل حجزك خطوة بخطوة 📝.\nأولاً، أرسل (الاسم الثلاثي):");
@@ -139,8 +142,11 @@ async function handleMessage(event) {
         let currentState = await redis.get(stateKey);
 
         if (!currentState) {
-            // رسالة ترحيبية إذا لم يكن هناك حالة نشطة ولم يرسل كلمة حجز
-            await sendMessage(senderId, "مرحباً بك في DaVinci Store! 🎨\nإذا كنت تريد تسجيل حجز جديد، أرسل كلمة (حجز).");
+            // تجاهل الرسائل التي لا تحتوي على كلمة حجز إذا لم يكن هناك حجز قائم
+            // أو يمكن إرسال رسالة ترحيبية بسيطة
+            if (messageText.length < 20) { // لتجنب الرد على الرسائل الطويلة العشوائية
+                 await sendMessage(senderId, "مرحباً بك في DaVinci Store! 🎨\nلتسجيل حجز جديد، أرسل كلمة (حجز).");
+            }
             return;
         }
 
@@ -190,7 +196,11 @@ async function handleMessage(event) {
         }
     } catch (error) {
         console.error("Error in handleMessage:", error);
-        // لا نرسل رسالة خطأ للمستخدم لتجنب الإزعاج إلا في الحالات الضرورية
+        try {
+            await sendMessage(senderId, "⚠️ حدث خطأ بسيط، يرجى المحاولة مرة أخرى أو كتابة كلمة 'حجز' للبدء من جديد.");
+        } catch (e) {
+            console.error("Failed to send error message:", e);
+        }
     }
 }
 
