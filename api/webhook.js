@@ -1,5 +1,9 @@
 const https = require('https');
 const Redis = require('ioredis');
+const axios = require('axios');
+
+// --- إعدادات قاعدة بيانات Firebase ---
+const FB_DB_URL = "https://davinci-a9db7-default-rtdb.firebaseio.com/store_master_v5";
 
 // --- إعدادات البيئة ---
 const PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -87,25 +91,50 @@ async function sendMessage(psid, message) {
 // معالجة التعليقات
 async function handleComment(event) {
     const { post_id, comment_id, from, message } = event;
-    if (from.id === process.env.FB_PAGE_ID) return; // تجاهل تعليقات الصفحة نفسها
+    const senderId = from.id;
+    if (senderId === process.env.FB_PAGE_ID) return;
 
     console.log(`💬 تعليق جديد من ${from.name}: ${message}`);
 
-    // محاولة جلب معلومات المنتج المرتبط بالمنشور من قاعدة البيانات
+    // محاولة جلب معلومات المنتج من Firebase
     let productDetails = {
-        price: "150 دينار", // افتراضي
+        price: "سيتم تزويدك بالسعر لاحقاً",
         link: "https://da-vinci.ezone.ly",
-        name: "منتج رائع من دافينشي"
+        name: "منتج من دافينشي",
+        stock: 0,
+        cat: "",
+        key: ""
     };
 
-    if (redis) {
-        const savedData = await redis.get(`post:${post_id}`);
-        if (savedData) {
-            productDetails = JSON.parse(savedData);
+    try {
+        const fbRes = await axios.get(`${FB_DB_URL}/products.json`);
+        const categories = fbRes.data || {};
+        
+        // محاولة إيجاد المنتج المطابق (عبر SKU في نص التعليق أو عبر آخر منشور)
+        // ملاحظة: في حالتنا سنبحث عن أي منتج SKU الخاص به موجود في "message" (التي قد تكون نص المنشور أو التعليق حسب الحدث)
+        // لكن هنا event هو التعليق. نحتاج لجلب نص المنشور الأصلي.
+        
+        const postInfo = await makeRequest(`/${post_id}?fields=message,attachments&access_token=${PAGE_ACCESS_TOKEN}`);
+        const postText = postInfo.message || "";
+        
+        for (let catName in categories) {
+            for (let prodKey in categories[catName]) {
+                const p = categories[catName][prodKey];
+                if (p.sku && postText.includes(p.sku)) {
+                    productDetails = {
+                        ...p,
+                        cat: catName,
+                        key: prodKey,
+                        price: `${p.price} د.ل`,
+                        link: `https://da-vinci.ezone.ly/products/${p.sku}`
+                    };
+                    break;
+                }
+            }
         }
-    }
+    } catch (e) { console.error("Firebase Fetch Error:", e); }
 
-    // 1. عمل لايك والرد في العام (مع عزل الأخطاء لضمان عدم توقف الرسالة الخاصة)
+    // 1. عمل لايك والرد في العام
     try {
         await likeComment(comment_id);
     } catch (e) { console.error("Like Error:", e); }
@@ -114,24 +143,31 @@ async function handleComment(event) {
         await replyToCommentPublicly(comment_id, `أهلاً بك يا ${from.name} 🌹، تم إرسال التفاصيل كاملة في رسالة خاصة 📩.`);
     } catch (e) { console.error("Public Reply Error:", e); }
 
-    // 2. إرسال التفاصيل في الخاص (بدون ذكر السعر في العام)
+    // 2. إرسال التفاصيل في الخاص
+    const stockStatus = (productDetails.stock > 0) ? "متوفر حالياً ✅" : "نفذت الكمية ❌";
     const privateMsg = `مرحباً بك في DaVinci Store! 🎨
 
 لقد استلمنا استفسارك بخصوص المنتج. تفضل كافة التفاصيل:
-🔹 المنتج: طقم ولادي كلاسيكي (صيفي)
-🔹 السعر: 110.00 د.ل
-🔹 حالة الحجز: متوفر حالياً ✅
-
-لرؤية كافة الصور والمقاسات في المتجر:
-https://da-vinci.ezone.ly/products/71723
+🔹 المنتج: ${productDetails.name}
+🔹 السعر: ${productDetails.price}
+🔹 حالة الحجز: ${stockStatus}
 
 للحجز الفوري، أرسل كلمة "حجز" هنا في المسنجر وسأقوم بتسجيل طلبك فوراً! 📩`;
 
-    // حفظ صورة المنتج كـ "آخر منتج مهتم به" لربطها بالحجز لاحقاً
-    const productImg = "https://cdn.ezone.ly/Prods/11977/585e05d26c6c4670bdca8359f8b67ca9.jpg";
-    await redis.set(`last_product_img:${senderId}`, productImg, 'EX', 86400); // تنتهي بعد 24 ساعة
+    // حفظ بيانات المنتج لربطها بالحجز لاحقاً
+    if (redis) {
+        const productToSave = {
+            name: productDetails.name,
+            price: productDetails.price,
+            img: productDetails.img || (productDetails.media && productDetails.media[0] ? productDetails.media[0].url : ""),
+            cat: productDetails.cat,
+            key: productDetails.key,
+            sku: productDetails.sku
+        };
+        await redis.set(`last_product:${senderId}`, JSON.stringify(productToSave), 'EX', 86400);
+    }
 
-    await sendPrivateReplyToComment(comment_id, privateMsg);
+    await sendMessage(senderId, privateMsg);
 }
 
 // دالة للتحقق من كلمات الحجز
@@ -212,28 +248,45 @@ async function handleMessage(event) {
         case "ASKING_LOCATION":
             currentOrder.location = messageText;
             
+            // جلب معلومات المنتج المهتم به
+            const lastProdStr = await redis.get(`last_product:${senderId}`);
+            let lastProd = lastProdStr ? JSON.parse(lastProdStr) : {};
+
             // حفظ الطلب النهائي في قائمة الطلبات
             const finalOrder = {
                 ...currentOrder,
+                product: lastProd.name || "منتج غير معروف",
+                price: lastProd.price || "0",
+                img: lastProd.img || "",
                 date: new Date().toISOString(),
                 status: 'جديد'
             };
             
-            // جلب صورة المنتج إذا كانت محفوظة
-            const lastImg = await redis.get(`last_product_img:${senderId}`);
-            if (lastImg) {
-                finalOrder.img = lastImg;
-            }
-
             await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify(finalOrder));
-            
-            // إضافة الطلب إلى سجل الطلبات العام (اختياري لسهولة الجلب)
             await redis.lpush('all_orders', JSON.stringify(finalOrder));
+
+            // --- تحديث المخزن في Firebase ---
+            if (lastProd.cat && lastProd.key) {
+                try {
+                    // جلب الكمية الحالية أولاً
+                    const stockRes = await axios.get(`${FB_DB_URL}/products/${lastProd.cat}/${lastProd.key}/stock.json`);
+                    const currentStock = parseInt(stockRes.data) || 0;
+                    
+                    if (currentStock > 0) {
+                        await axios.patch(`${FB_DB_URL}/products/${lastProd.cat}/${lastProd.key}.json`, {
+                            stock: currentStock - 1
+                        });
+                        console.log(`✅ تم إنقاص المخزون للمنتج ${lastProd.name}. الكمية الجديدة: ${currentStock - 1}`);
+                    }
+                } catch (e) {
+                    console.error("Firebase Stock Update Error:", e);
+                }
+            }
 
             // إعادة ضبط الحالة
             await redis.del(stateKey);
             await redis.del(orderKey);
-            await redis.del(`last_product_img:${senderId}`);
+            await redis.del(`last_product:${senderId}`);
 
             await sendMessage(senderId, "✅ تم استلام طلبك بنجاح! شكراً لثقتك بـ DaVinci Store. سيتم التواصل معك قريباً لتأكيد التوصيل. 😊");
             break;
