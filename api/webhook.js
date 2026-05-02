@@ -37,34 +37,33 @@ async function sendMessage(psid, message) {
 function findProduct(categories, searchText, postText = "") {
     const searchLower = searchText.toLowerCase();
     const postLower = postText.toLowerCase();
+    const fullText = searchLower + " " + postLower;
     
     let bestMatch = null;
 
-    for (let catName in categories) {
-        // التحقق مما إذا كان اسم القسم (مثلاً 35) مذكوراً
-        const catMatch = searchLower.includes(catName.toLowerCase()) || postLower.includes(catName.toLowerCase());
+    // دالة للبحث عن الكلمة ككلمة كاملة (Whole Word Match)
+    // تمنع تداخل الأرقام مثل البحث عن "3" فيجد "35"
+    const isWholeWordMatch = (target, text) => {
+        if (!target) return false;
+        // نستخدم regex للتأكد أن الرقم أو الكلمة محاطة بمسافات أو علامات ترقيم
+        const escapedTarget = target.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const regex = new RegExp(`(^|\\s|[\\.,!\\?]|\\-|#)${escapedTarget}($|\\s|[\\.,!\\?]|\\-|#)`, 'i');
+        return regex.test(text);
+    };
 
+    for (let catName in categories) {
         for (let prodKey in categories[catName]) {
             const p = categories[catName][prodKey];
             const sku = p.sku ? String(p.sku).toLowerCase() : "";
             const name = p.name ? String(p.name).toLowerCase() : "";
 
-            // 1. تطابق كامل مع الـ SKU
-            if (sku && (searchLower.includes(sku) || postLower.includes(sku))) {
+            // 1. الأولوية الأولى: تطابق الـ SKU ككلمة كاملة
+            if (sku && isWholeWordMatch(sku, fullText)) {
                 return { ...p, cat: catName, key: prodKey };
             }
 
-            // 2. إذا كان الكود (مثلاً 35) موجوداً في بداية الـ SKU (مثلاً 35-1y)
-            // نبحث عن أرقام في نص البحث
-            const numbersInSearch = searchLower.match(/\d+/g) || [];
-            for (let num of numbersInSearch) {
-                if (sku.startsWith(num)) {
-                    bestMatch = { ...p, cat: catName, key: prodKey };
-                }
-            }
-            
-            // 3. تطابق مع الاسم
-            if (name && (searchLower.includes(name) || postLower.includes(name))) {
+            // 2. الأولوية الثانية: تطابق الاسم ككلمة كاملة
+            if (name && isWholeWordMatch(name, fullText)) {
                 bestMatch = { ...p, cat: catName, key: prodKey };
             }
         }
