@@ -73,18 +73,32 @@ function findProduct(categories, searchText, postText = "") {
 
 async function handleComment(event) {
     const { post_id, comment_id, from, message } = event;
-    if (from.id === process.env.FB_PAGE_ID) return;
+    console.log(`Received comment: "${message}" from ${from.name} (ID: ${from.id}) on post ${post_id}`);
+    
+    if (from.id === process.env.FB_PAGE_ID) {
+        console.log("Ignored comment from the page itself.");
+        return;
+    }
 
     try {
+        console.log("Fetching products from Firebase...");
         const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json`);
         const categories = fbRes.data || {};
         
-        const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`);
-        const postText = postInfo.message || "";
+        console.log("Fetching post info...");
+        let postText = "";
+        try {
+            const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`);
+            postText = postInfo.message || "";
+        } catch (postErr) {
+            console.error("Could not fetch post info, proceeding with comment text only.");
+        }
         
+        console.log("Searching for product match...");
         const product = findProduct(categories, message, postText);
 
         if (product) {
+            console.log(`Product found: ${product.name} (SKU: ${product.sku})`);
             await likeComment(comment_id);
             const stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
             const sizesStr = product.sizes ? `\nالمقاسات: ${product.sizes}` : "";
@@ -97,7 +111,10 @@ async function handleComment(event) {
 للحجز، أرسل "حجز" في الخاص وسجل طلبك!`;
             
             const storeLink = `https://da-vinci.ezone.ly/products/${product.sku || product.id || product.key}`;
+            console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `تواصلنا معاك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
+            
+            console.log("Sending private message...");
             await sendMessage(from.id, msg);
 
             if (redis) {
@@ -107,8 +124,13 @@ async function handleComment(event) {
                     img: product.img || ""
                 }), 'EX', 86400);
             }
+            console.log("Comment handling completed successfully.");
+        } else {
+            console.log("No matching product found for this comment/post.");
         }
-    } catch (e) { console.error("Comment Error:", e); }
+    } catch (e) { 
+        console.error("Critical Comment Handling Error:", e.response ? e.response.data : e.message); 
+    }
 }
 
 async function handleMessage(event) {
