@@ -87,10 +87,11 @@ async function handleComment(event) {
         if (product) {
             await likeComment(comment_id);
             const stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+            const sizesStr = product.sizes ? `\nالمقاسات: ${product.sizes}` : "";
             const msg = `مرحباً ${from.name}! 👋
 المنتج: ${product.name}
 الكود: ${product.sku}
-السعر: ${product.price} د.ل
+السعر: ${product.price} د.ل${sizesStr}
 حالة المخزون: ${stockStatus}
 
 للحجز، أرسل "حجز" في الخاص وسجل طلبك!`;
