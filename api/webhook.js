@@ -96,7 +96,8 @@ async function handleComment(event) {
 
 للحجز، أرسل "حجز" في الخاص وسجل طلبك!`;
             
-            await replyToCommentPublicly(comment_id, `تم الرد في الخاص! 🌹`);
+            const storeLink = `https://da-vinci.ezone.ly/products/${product.sku || product.id || product.key}`;
+            await replyToCommentPublicly(comment_id, `تم الرد في الخاص! 🌹\nرابط المنتج: ${storeLink}`);
             await sendMessage(from.id, msg);
 
             if (redis) {
