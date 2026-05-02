@@ -1,8 +1,9 @@
 const axios = require('axios');
 const Redis = require('ioredis');
 
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "EAAR90m9nfb4BRVbicflguLQadazJxXTfgrxyhnIXcPqJzF8YIsxvJGoQlo3niCQMNrk2ZAEJlrderf17cRDuiIVZAhh5pK8ZCd6KXfipFz8U8ZAzzRoLXLZBQXIsS4GZB8TFSvuxPTZB8TcGNQdpdY34o2KYrmHZA56tavAMZCHKYuk3qFGAJAmzM8zNfNKrWe36HnzIlXCxNle8RXKpK3wsPEimp";
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "davinci_token_2024";
+const FB_PAGE_ID = process.env.FB_PAGE_ID || "110508451733432";
 const FB_DB_URL = "https://davinci-a9db7-default-rtdb.firebaseio.com";
 const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
 
@@ -75,7 +76,7 @@ async function handleComment(event) {
     const { post_id, comment_id, from, message } = event;
     console.log(`Received comment: "${message}" from ${from.name} (ID: ${from.id}) on post ${post_id}`);
     
-    if (from.id === process.env.FB_PAGE_ID) {
+    if (from.id === FB_PAGE_ID) {
         console.log("Ignored comment from the page itself.");
         return;
     }
