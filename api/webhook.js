@@ -32,7 +32,8 @@ async function makeRequest(path, method, body = null) {
         const errObj = error.response ? error.response.data : error.message;
         console.error(`FB API Error (${path}):`, errObj);
         if (redis) {
-            await redis.set(`debug_error:last_fb_api`, JSON.stringify(errObj));
+            const apiName = path.includes('private_replies') ? 'private_replies' : 'messages';
+            await redis.set(`debug_error:${apiName}`, JSON.stringify(errObj));
         }
         return null; // Return null instead of throwing to keep the loop running
     }
