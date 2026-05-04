@@ -153,12 +153,44 @@ async function handleMessage(event) {
                 order.phone = messageText;
                 await redis.set(orderKey, JSON.stringify(order));
                 await redis.set(stateKey, "ASKING_LOCATION");
-                await sendMessage(senderId, "وأخيراً، العنوان بالتفصيل:");
+                await sendMessage(senderId, "العنوان بالتفصيل:");
                 break;
             case "ASKING_LOCATION":
                 order.location = messageText;
+                await redis.set(orderKey, JSON.stringify(order));
+                await redis.set(stateKey, "ASKING_LANDMARK");
+                await sendMessage(senderId, "أقرب نقطة دالة:");
+                break;
+            case "ASKING_LANDMARK":
+                order.landmark = messageText;
+                await redis.set(orderKey, JSON.stringify(order));
+                await redis.set(stateKey, "ASKING_NOTES");
+                await sendMessage(senderId, "أي ملاحظات إضافية؟ (أو اكتب 'لا يوجد'):");
+                break;
+            case "ASKING_NOTES":
+                order.notes = messageText;
                 const lastProd = JSON.parse(await redis.get(`last_product:${senderId}`) || "{}");
                 
+                order.productName = lastProd.name || "غير محدد";
+                order.productPrice = parseFloat(lastProd.price) || 0;
+                order.productImg = lastProd.img || "";
+                order.date = new Date().toISOString();
+                order.status = "جديد";
+
+                // Save final order
+                await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
+                    name: order.name,
+                    phone: order.phone,
+                    location: order.location,
+                    landmark: order.landmark,
+                    notes: order.notes,
+                    details: `المنتج: ${order.productName} | السعر: ${order.productPrice}`,
+                    price: order.productPrice,
+                    img: order.productImg,
+                    status: order.status,
+                    date: order.date
+                }));
+
                 if (lastProd.cat && lastProd.key) {
                     try {
                         const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json`);
@@ -170,7 +202,7 @@ async function handleMessage(event) {
                 }
 
                 await redis.del(stateKey, orderKey, `last_product:${senderId}`);
-                await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سنتصل بك قريباً.");
+                await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سنتصل بك قريباً لتأكيد الطلب.");
                 break;
         }
     } catch (e) { console.error("Message Error:", e.message); }
