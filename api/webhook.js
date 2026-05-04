@@ -29,7 +29,11 @@ async function makeRequest(path, method, body = null) {
         });
         return response.data;
     } catch (error) {
-        console.error(`FB API Error (${path}):`, error.response ? error.response.data : error.message);
+        const errObj = error.response ? error.response.data : error.message;
+        console.error(`FB API Error (${path}):`, errObj);
+        if (redis && path.includes('private_replies')) {
+            await redis.set(`debug_error:last_fb_api`, JSON.stringify(errObj));
+        }
         return null; // Return null instead of throwing to keep the loop running
     }
 }
@@ -108,7 +112,10 @@ async function handleComment(event) {
             console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
             console.log("Sending private reply...");
-            await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
+            const replyRes = await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
+            if (!replyRes) {
+                 if(redis) await redis.set(`debug_error:${comment_id}`, "Private reply returned null or threw error");
+            }
 
             if (redis) {
                 try {
