@@ -31,7 +31,7 @@ async function makeRequest(path, method, body = null) {
     } catch (error) {
         const errObj = error.response ? error.response.data : error.message;
         console.error(`FB API Error (${path}):`, errObj);
-        if (redis && path.includes('private_replies')) {
+        if (redis) {
             await redis.set(`debug_error:last_fb_api`, JSON.stringify(errObj));
         }
         return null; // Return null instead of throwing to keep the loop running
@@ -111,8 +111,14 @@ async function handleComment(event) {
             const storeLink = `https://da-vinci.ezone.ly/products/${productID}`;
             console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
-            console.log("Sending private message...");
-            await sendMessage(from.id, msg);
+            
+            console.log("Sending private reply via private_replies endpoint...");
+            let pReply = await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
+            
+            if (!pReply) {
+                console.log("private_replies failed, falling back to /me/messages...");
+                await sendMessage(from.id, msg);
+            }
 
             if (redis) {
                 try {
