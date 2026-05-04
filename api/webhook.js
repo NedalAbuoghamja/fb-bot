@@ -111,11 +111,8 @@ async function handleComment(event) {
             const storeLink = `https://da-vinci.ezone.ly/products/${productID}`;
             console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
-            console.log("Sending private reply...");
-            const replyRes = await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
-            if (!replyRes) {
-                 if(redis) await redis.set(`debug_error:${comment_id}`, "Private reply returned null or threw error");
-            }
+            console.log("Sending private message...");
+            await sendMessage(from.id, msg);
 
             if (redis) {
                 try {
