@@ -8,6 +8,11 @@ if (REDIS_URL) {
 
 module.exports = async (req, res) => {
     if (!redis) return res.status(500).send("No redis");
-    const err = await redis.get('debug_error:last_fb_api');
-    res.status(200).json({ error: err ? JSON.parse(err) : null });
+    const keys = await redis.keys('debug_error:*');
+    const errors = {};
+    for (const key of keys) {
+        const val = await redis.get(key);
+        errors[key] = val;
+    }
+    res.status(200).json({ errors });
 };
