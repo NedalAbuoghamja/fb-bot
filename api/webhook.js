@@ -60,7 +60,7 @@ function findProduct(categories, searchText, postText = "") {
     const isWholeWordMatch = (target, text) => {
         if (!target) return false;
         const escapedTarget = target.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        const regex = new RegExp(`(^|\\s|[\\.,!\\?]|\\-|#)${escapedTarget}($|\\s|[\\.,!\\?]|\\-|#)`, 'i');
+        const regex = new RegExp(`(^|\\s|[\\.,!\\?،]|\\-|#)${escapedTarget}($|\\s|[\\.,!\\?،]|\\-|#)`, 'i');
         return regex.test(text);
     };
 
@@ -71,7 +71,7 @@ function findProduct(categories, searchText, postText = "") {
             const name = p.name ? String(p.name).toLowerCase() : "";
 
             if (sku && isWholeWordMatch(sku, fullText)) return { ...p, cat: catName, key: prodKey };
-            if (name && isWholeWordMatch(name, fullText)) bestMatch = { ...p, cat: catName, key: prodKey };
+            if (name && fullText.includes(name)) bestMatch = { ...p, cat: catName, key: prodKey };
         }
     }
     return bestMatch;
@@ -107,7 +107,8 @@ async function handleComment(event) {
             const storeLink = `https://da-vinci.ezone.ly/products/${productID}`;
             console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
-            await sendMessage(from.id, msg);
+            console.log("Sending private reply...");
+            await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
 
             if (redis) {
                 try {
