@@ -127,7 +127,22 @@ async function handleComment(event) {
 
         if (product) {
             await likeComment(comment_id);
-            const stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+            
+            let stockStatus = "نفد ❌";
+            if (product.key) {
+                try {
+                    const ezoneToken = await ezoneClient.getScopedToken(redis);
+                    const variants = await ezoneClient.getVariants(ezoneToken, product.key);
+                    const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                } catch (ezoneErr) {
+                    console.error("[Webhook] Ezone stock check failed for comment:", ezoneErr.message);
+                    stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+                }
+            } else {
+                stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+            }
+
             const sizesStr = product.sizes ? `\n📏 المقاسات: ${product.sizes}` : "";
             const msg = `🌹 مرحباً ${from.name}
             
@@ -172,6 +187,31 @@ async function handleMessage(event) {
         const orderKey = `order:${senderId}`;
 
         if (messageText.toLowerCase().includes("حجز")) {
+            const lastProd = JSON.parse(await redis.get(`last_product:${senderId}`) || "{}");
+            if (!lastProd.key) {
+                await sendMessage(senderId, "⚠️ يرجى اختيار منتج أولاً بالتعليق على منشور المنتج أو إرسال كود المنتج.");
+                return;
+            }
+
+            try {
+                console.log(`[Webhook] Checking Ezone stock for product ${lastProd.key}...`);
+                const ezoneToken = await ezoneClient.getScopedToken(redis);
+                const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
+                const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+
+                if (totalStock <= 0) {
+                    await sendMessage(senderId, `❌ عذراً، منتج "${lastProd.name}" نفدت كميته بالكامل من المخزون حالياً ولا يمكن حجزه.`);
+                    return;
+                }
+            } catch (err) {
+                console.error("[Webhook] Ezone stock check failed at booking initiation:", err.message);
+                const fbStock = parseInt(lastProd.stock) || 0;
+                if (fbStock <= 0) {
+                    await sendMessage(senderId, `❌ عذراً، هذا المنتج غير متوفر حالياً.`);
+                    return;
+                }
+            }
+
             await sendMessage(senderId, "نبدأ الحجز! 📝 أرسل اسمك الثلاثي:");
             await redis.set(stateKey, "ASKING_NAME");
             return;
@@ -204,12 +244,41 @@ async function handleMessage(event) {
             case "ASKING_LANDMARK":
                 order.landmark = messageText;
                 await redis.set(orderKey, JSON.stringify(order));
+                await redis.set(stateKey, "ASKING_QTY");
+                await sendMessage(senderId, "كم الكمية المطلوبة؟ (أدخل رقماً، مثال: 1):");
+                break;
+            case "ASKING_QTY":
+                const qty = parseInt(messageText, 10);
+                if (isNaN(qty) || qty <= 0) {
+                    await sendMessage(senderId, "⚠️ الرجاء إدخال كمية صحيحة (رقم أكبر من 0):");
+                    return;
+                }
+
+                const lastProdForQty = JSON.parse(await redis.get(`last_product:${senderId}`) || "{}");
+                if (lastProdForQty.key) {
+                    try {
+                        const ezoneToken = await ezoneClient.getScopedToken(redis);
+                        const variants = await ezoneClient.getVariants(ezoneToken, lastProdForQty.key);
+                        const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                        
+                        if (qty > totalStock) {
+                            await sendMessage(senderId, `❌ عذراً، الكمية المطلوبة غير متوفرة. المتوفر في المخزون حالياً هو ${totalStock} فقط. يرجى إدخال كمية أقل:`);
+                            return;
+                        }
+                    } catch (err) {
+                        console.error("[Webhook] Ezone stock check failed at ASKING_QTY:", err.message);
+                    }
+                }
+
+                order.quantity = qty;
+                await redis.set(orderKey, JSON.stringify(order));
                 await redis.set(stateKey, "ASKING_NOTES");
-                await sendMessage(senderId, "أي ملاحظات إضافية؟ (أو اكتب 'لا يوجد'):");
+                await sendMessage(senderId, "أي ملاحظات إضافية أو المقاس المطلوبة؟ (أو اكتب 'لا يوجد'):");
                 break;
             case "ASKING_NOTES":
                 order.notes = messageText;
                 const lastProd = JSON.parse(await redis.get(`last_product:${senderId}`) || "{}");
+                const orderQty = order.quantity || 1;
                 
                 order.productName = lastProd.name || "غير محدد";
                 order.productPrice = parseFloat(lastProd.price) || 0;
@@ -224,17 +293,24 @@ async function handleMessage(event) {
                     try {
                         console.log(`[Webhook] Automating order creation on Ezone for product ${lastProd.key}...`);
                         const ezoneToken = await ezoneClient.getScopedToken(redis);
-                        const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
-                        const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
-                        const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine);
                         
                         const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
                         const matchedVariant = ezoneClient.matchVariant(variants, order.notes, messageText);
                         
                         if (matchedVariant) {
                             variantText = matchedVariant.text.trim();
-                            console.log(`[Webhook] Matched variant: ${variantText} (ID: ${matchedVariant.variantId})`);
-                            ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, lastProd.key, matchedVariant.variantId, 1);
+                            console.log(`[Webhook] Matched variant: ${variantText} (ID: ${matchedVariant.variantId}), quantity: ${matchedVariant.quantity}`);
+                            
+                            if (matchedVariant.quantity < orderQty) {
+                                await sendMessage(senderId, `❌ عذراً، هذا المقاس/الخيار المحدد (${variantText}) نفدت كميته أو غير متوفر بالكمية المطلوبة (المتوفر حالياً: ${matchedVariant.quantity}). يرجى كتابة مقاس آخر متوفر أو تعديل الطلب:`);
+                                return;
+                            }
+                            
+                            const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
+                            const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
+                            const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine);
+                            
+                            ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, lastProd.key, matchedVariant.variantId, orderQty);
                         } else {
                             console.log("[Webhook] No matching variants found.");
                         }
@@ -243,6 +319,7 @@ async function handleMessage(event) {
                     }
                 }
 
+                const totalPrice = order.productPrice * orderQty;
                 // Save final order in local dashboard
                 await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
                     name: order.name,
@@ -250,8 +327,8 @@ async function handleMessage(event) {
                     location: order.location,
                     landmark: order.landmark,
                     notes: order.notes,
-                    details: `المنتج: ${order.productName} (${variantText}) | السعر: ${order.productPrice} د.ل`,
-                    price: order.productPrice,
+                    details: `المنتج: ${order.productName} (${variantText}) | الكمية: ${orderQty} | السعر الإجمالي: ${totalPrice} د.ل`,
+                    price: totalPrice,
                     img: order.productImg,
                     status: order.status,
                     date: order.date,
@@ -263,8 +340,8 @@ async function handleMessage(event) {
                         const token = await getFirebaseAuthToken();
                         const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`);
                         const currentStock = parseInt(stockRes.data) || 0;
-                        if (currentStock > 0) {
-                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - 1);
+                        if (currentStock >= orderQty) {
+                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - orderQty);
                         }
                     } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
                 }
