@@ -8,6 +8,18 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "davinci_token_2024";
 const FB_PAGE_ID = process.env.FB_PAGE_ID || "110508451733432";
 const FB_DB_URL = "https://davinci-a9db7-default-rtdb.firebaseio.com";
 
+const WELCOME_MESSAGE = `أهلاً بك في DaVinci Store! 🌸
+يسعدنا تواصلك معنا. أنا المساعد التلقائي للمتجر، ويمكنني مساعدتك في:
+
+1️⃣ لمعرفة تفاصيل أي منتج أو حجه تلقائياً:
+👈 يرجى كتابة كود المنتج (مثلاً: 51 أو 18) أو إرسال رابط منشور المنتج.
+
+2️⃣ للحجز السريع لآخر منتج شاهدته:
+👈 أرسل كلمة "حجز".
+
+3️⃣ للاستفسارات الأخرى أو إرسال صورة:
+👈 أرسل رسالتك وسيقوم أحد موظفينا بالرد عليك في أقرب وقت! 🌹`;
+
 const API_KEY = "AIzaSyAcP3Ud60BC-RKD7bYVBx8bcro--L4mkLQ";
 const EMAIL = "nedal@davinci.com";
 const PASSWORD = "111111";
@@ -366,6 +378,20 @@ async function handleMessage(event) {
                 await redis.set(stateKey, "START_OR_NOT");
                 return;
             }
+            // If no product is matched, check if it's a greeting
+            if (messageText) {
+                const normMsg = ezoneClient.normalizeArabic(messageText).trim();
+                const greetings = ["سلام", "مرحبا", "اهلان", "اهلا", "صباح الخير", "مساء الخير", "يا هلا", "مرحبتين", "hello", "hi", "hey"];
+                const isGreeting = greetings.some(g => {
+                    const normG = ezoneClient.normalizeArabic(g).trim();
+                    return normMsg === normG || normMsg.startsWith(normG + " ") || normMsg.endsWith(" " + normG) || normMsg.includes(" " + normG + " ");
+                });
+
+                if (isGreeting) {
+                    await sendMessage(senderId, WELCOME_MESSAGE);
+                    return;
+                }
+            }
             return;
         }
 
@@ -704,6 +730,14 @@ async function handleMessage(event) {
     } catch (e) { console.error("Message Error:", e.message); }
 }
 
+async function handlePostback(event) {
+    const senderId = event.sender.id;
+    const payload = event.postback.payload;
+    if (payload === "GET_STARTED") {
+        await sendMessage(senderId, WELCOME_MESSAGE);
+    }
+}
+
 module.exports = async (req, res) => {
     try {
         if (req.method === 'GET') {
@@ -726,6 +760,8 @@ module.exports = async (req, res) => {
                         for (const ev of entry.messaging) {
                             if (ev.message && !ev.message.is_echo) {
                                 await handleMessage(ev);
+                            } else if (ev.postback) {
+                                await handlePostback(ev);
                             }
                         }
                     }
