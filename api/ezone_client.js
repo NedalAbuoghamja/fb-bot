@@ -11,10 +11,17 @@ let inMemoryExpires = 0;
 function normalizeArabic(text) {
     if (!text) return "";
     return text.toLowerCase()
+        .replace(/(\p{L})(\p{N})/gu, '$1 $2') // letter to digit
+        .replace(/(\p{N})(\p{L})/gu, '$1 $2') // digit to letter
         .replace(/[أإآ]/g, "ا")
         .replace(/ة/g, "ه")
         .replace(/ى/g, "ي")
-        .replace(/[\s\-\,\.\_\/\#\(\)]+/g, " ");
+        .replace(/[\s\-\,\.\_\/\#\(\)]+/g, " ")
+        .trim();
+}
+
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -293,8 +300,10 @@ function matchVariant(variants, notes, message) {
         let score = 0;
         const vNorm = normalizeArabic(v.text);
 
-        // 1. Exact or substring match
-        if (normText.includes(vNorm)) {
+        // 1. Whole-word match
+        const escapedV = escapeRegExp(vNorm);
+        const wordRegex = new RegExp(`(?:^|\\s)${escapedV}(?:$|\\s)`, "i");
+        if (wordRegex.test(normText)) {
             score += 20;
         }
 
@@ -306,7 +315,7 @@ function matchVariant(variants, notes, message) {
             
             for (const kw of keywords) {
                 const normKw = normalizeArabic(kw);
-                const regex = new RegExp(`(?:^|\\s)${normKw}(?:$|\\s)`, "i");
+                const regex = new RegExp(`(?:^|\\s)${escapeRegExp(normKw)}(?:$|\\s)`, "i");
                 if (regex.test(normText)) {
                     score += 10;
                 }
@@ -329,22 +338,185 @@ function matchVariant(variants, notes, message) {
 }
 
 /**
+ * Match multiple variants and allocate quantities based on customer notes/messages
+ */
+function matchMultipleVariants(variants, notes, message, requestedQty) {
+    if (!variants || variants.length === 0) {
+        return { allocated: [], error: null };
+    }
+
+    const combinedText = ((notes || "") + " " + (message || "")).trim();
+    const cleanedText = combinedText.replace(/09[1245]\d{7}/g, '').replace(/\+?218\d+/g, '');
+    const normText = normalizeArabic(cleanedText);
+
+    const matches = [];
+    const wordMappings = {
+        "1": ["1", "سنه", "سنة", "عام", "واحد"],
+        "2": ["2", "سنتين", "سنتان", "اثنين", "تنين"],
+        "3": ["3", "ثلاث", "تلات", "تلاتة", "ثلاثة"],
+        "4": ["4", "اربع", "أربع", "اربعه", "أربعة"],
+        "5": ["5", "خمس", "خمسه", "خمسة"],
+        "6": ["6", "ست", "سته", "ستة"],
+        "7": ["7", "سبع", "سبعه", "سبعة"],
+        "8": ["8", "ثمان", "تمان", "ثمانيه", "تمانية"],
+        "9": ["9", "تسع", "تسعه", "تسعة"],
+        "10": ["10", "عشر", "عشره", "عشرة"]
+    };
+
+    for (const v of variants) {
+        let score = 0;
+        const vNorm = normalizeArabic(v.text);
+
+        // 1. Whole-word match
+        const escapedV = escapeRegExp(vNorm);
+        const wordRegex = new RegExp(`(?:^|\\s)${escapedV}(?:$|\\s)`, "i");
+        if (wordRegex.test(normText)) {
+            score += 20;
+        }
+
+        // 2. Keyword/digit-based matches
+        const digitMatch = v.text.match(/\d+/);
+        if (digitMatch) {
+            const digit = digitMatch[0];
+            const keywords = wordMappings[digit] || [digit];
+            
+            for (const kw of keywords) {
+                const normKw = normalizeArabic(kw);
+                const kwRegex = new RegExp(`(?:^|\\s)${escapeRegExp(normKw)}(?:$|\\s)`, "i");
+                if (kwRegex.test(normText)) {
+                    score += 10;
+                }
+            }
+        }
+
+        if (score > 0) {
+            matches.push({ variant: v, score });
+        }
+    }
+
+    // Sort matches by score descending
+    matches.sort((a, b) => b.score - a.score);
+
+    // If no explicit matches, use fallback (first in-stock variant)
+    if (matches.length === 0) {
+        const withStock = variants.find(v => v.quantity > 0) || variants[0];
+        if (!withStock || withStock.quantity <= 0) {
+            return {
+                allocated: [],
+                error: `❌ عذراً، هذا المنتج نفد من المخزون بالكامل ولا يمكن حجزه حالياً.`
+            };
+        }
+        
+        if (withStock.quantity < requestedQty) {
+            return {
+                allocated: [],
+                error: `❌ عذراً، الكمية المطلوبة غير متوفرة. المتوفر في المخزون حالياً هو ${withStock.quantity} فقط.`
+            };
+        }
+
+        return {
+            allocated: [{ variant: withStock, quantity: requestedQty }],
+            error: null
+        };
+    }
+
+    // Validation 1: User requested fewer items than the matched sizes/variants
+    if (matches.length > requestedQty) {
+        const matchedNames = matches.map(m => m.variant.text.trim()).join(" و ");
+        return {
+            allocated: [],
+            error: `⚠️ لقد حددت الكمية (${requestedQty}) ولكنك اخترت مقاسات أكثر (${matchedNames}). يرجى الحجز من جديد وتحديد الكمية الصحيحة لتطابق عدد المقاسات.`
+        };
+    }
+
+    // Validation 2: Check if any explicitly matched variant is completely out of stock
+    for (const m of matches) {
+        if (m.variant.quantity <= 0) {
+            return {
+                allocated: [],
+                error: `❌ عذراً، خيار/مقاس "${m.variant.text.trim()}" نفد من المخزون حالياً. يرجى اختيار مقاس آخر متوفر.`
+            };
+        }
+    }
+
+    // Allocate quantities
+    const allocated = [];
+    let remaining = requestedQty;
+    const allocMap = new Map();
+
+    for (const m of matches) {
+        allocMap.set(m.variant.variantId, { variant: m.variant, quantity: 0 });
+    }
+
+    // Loop 1: Give 1 to each match
+    for (const m of matches) {
+        if (remaining > 0) {
+            allocMap.get(m.variant.variantId).quantity += 1;
+            remaining -= 1;
+        }
+    }
+
+    // Loop 2: Distribute remaining quantity up to stock capacity
+    if (remaining > 0) {
+        for (const m of matches) {
+            const currentAlloc = allocMap.get(m.variant.variantId);
+            const availableSpace = m.variant.quantity - currentAlloc.quantity;
+            if (availableSpace > 0 && remaining > 0) {
+                const toAdd = Math.min(availableSpace, remaining);
+                currentAlloc.quantity += toAdd;
+                remaining -= toAdd;
+            }
+        }
+    }
+
+    // Validation 3: If there is still remaining quantity, it means stock is insufficient
+    if (remaining > 0) {
+        const matchedNames = matches.map(m => `${m.variant.text.trim()} (المتوفر: ${m.variant.quantity})`).join("، ");
+        return {
+            allocated: [],
+            error: `❌ عذراً، الكمية المطلوبة غير متوفرة بالكامل في المقاسات المحددة. المتوفر حالياً: ${matchedNames}.`
+        };
+    }
+
+    // Convert map to array of non-zero allocations
+    for (const item of allocMap.values()) {
+        if (item.quantity > 0) {
+            allocated.push(item);
+        }
+    }
+
+    return { allocated, error: null };
+}
+
+/**
  * Place the order on Ezone
  */
 async function placeOrder(token, customerId, addressId, productId, variantId, quantity = 1) {
     try {
-        console.log(`[Ezone] Submitting order for customer ${customerId}, address ${addressId}, product ${productId}, variant ${variantId}...`);
-        const payload = {
-            customerId: customerId,
-            addressId: addressId,
-            paymentType: 1, // Cash on Delivery
-            items: [
+        let items = [];
+        if (Array.isArray(productId)) {
+            items = productId;
+            console.log(`[Ezone] Submitting order for customer ${customerId}, address ${addressId} with ${items.length} items...`);
+        } else {
+            console.log(`[Ezone] Submitting order for customer ${customerId}, address ${addressId}, product ${productId}, variant ${variantId}...`);
+            items = [
                 {
                     productId: parseInt(productId, 10),
                     variantId: parseInt(variantId, 10),
                     quantity: quantity
                 }
-            ]
+            ];
+        }
+
+        const payload = {
+            customerId: customerId,
+            addressId: addressId,
+            paymentType: 1, // Cash on Delivery
+            items: items.map(item => ({
+                productId: parseInt(item.productId, 10),
+                variantId: parseInt(item.variantId, 10),
+                quantity: parseInt(item.quantity, 10)
+            }))
         };
 
         const res = await fetch('https://mapi.ezone.ly/orders/new', {
@@ -381,5 +553,6 @@ module.exports = {
     findOrCreateAddress,
     getVariants,
     matchVariant,
+    matchMultipleVariants,
     placeOrder
 };

@@ -295,22 +295,28 @@ async function handleMessage(event) {
                         const ezoneToken = await ezoneClient.getScopedToken(redis);
                         
                         const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
-                        const matchedVariant = ezoneClient.matchVariant(variants, order.notes, messageText);
+                        const { allocated: allocatedItems, error: matchError } = ezoneClient.matchMultipleVariants(variants, order.notes, messageText, orderQty);
                         
-                        if (matchedVariant) {
-                            variantText = matchedVariant.text.trim();
-                            console.log(`[Webhook] Matched variant: ${variantText} (ID: ${matchedVariant.variantId}), quantity: ${matchedVariant.quantity}`);
-                            
-                            if (matchedVariant.quantity < orderQty) {
-                                await sendMessage(senderId, `❌ عذراً، هذا المقاس/الخيار المحدد (${variantText}) نفدت كميته أو غير متوفر بالكمية المطلوبة (المتوفر حالياً: ${matchedVariant.quantity}). يرجى كتابة مقاس آخر متوفر أو تعديل الطلب:`);
-                                return;
-                            }
-                            
+                        if (matchError) {
+                            await sendMessage(senderId, matchError);
+                            return;
+                        }
+
+                        if (allocatedItems && allocatedItems.length > 0) {
+                            variantText = allocatedItems.map(item => `${item.variant.text.trim()} (عدد: ${item.quantity})`).join(", ");
+                            console.log(`[Webhook] Matched and allocated variants: ${variantText}`);
+
                             const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
                             const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
                             const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine);
                             
-                            ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, lastProd.key, matchedVariant.variantId, orderQty);
+                            const ezoneItems = allocatedItems.map(item => ({
+                                productId: lastProd.key,
+                                variantId: item.variant.variantId,
+                                quantity: item.quantity
+                            }));
+
+                            ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, ezoneItems);
                         } else {
                             console.log("[Webhook] No matching variants found.");
                         }
@@ -327,7 +333,7 @@ async function handleMessage(event) {
                     location: order.location,
                     landmark: order.landmark,
                     notes: order.notes,
-                    details: `المنتج: ${order.productName} (${variantText}) | الكمية: ${orderQty} | السعر الإجمالي: ${totalPrice} د.ل`,
+                    details: `المنتج: ${order.productName} (${variantText}) | الكمية الإجمالية: ${orderQty} | السعر الإجمالي: ${totalPrice} د.ل`,
                     price: totalPrice,
                     img: order.productImg,
                     status: order.status,
