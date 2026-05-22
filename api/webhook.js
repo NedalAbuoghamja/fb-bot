@@ -260,7 +260,7 @@ async function sendSizeSelection(senderId, redis, lastProd, stateKey, isFirstTim
     }
 }
 
-async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey) {
+async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host) {
     try {
         let ezoneOrderId = null;
         let variantText = "غير محدد";
@@ -300,6 +300,7 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
         let productTotal = 0;
         let totalDiscount = 0;
         let itemsDetailsText = "";
+        let structuredItems = [];
 
         try {
             const ezoneToken = await ezoneClient.getScopedToken(redis);
@@ -315,6 +316,14 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
                     if (originalPrice > price) {
                         totalDiscount += (originalPrice - price) * item.quantity;
                     }
+
+                    structuredItems.push({
+                        variantId: item.variantId,
+                        sizeText: item.sizeText,
+                        quantity: item.quantity,
+                        price: price,
+                        originalPrice: originalPrice
+                    });
                     
                     return `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`;
                 }).join("\n");
@@ -325,6 +334,24 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
             const basePrice = parseFloat(lastProd.price) || 0;
             productTotal = basePrice * totalQty;
             itemsDetailsText = order.items ? order.items.map(item => `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`).join("\n") : "  - الكمية: 1";
+            
+            if (order.items && order.items.length > 0) {
+                structuredItems = order.items.map(item => ({
+                    variantId: item.variantId,
+                    sizeText: item.sizeText,
+                    quantity: item.quantity,
+                    price: basePrice,
+                    originalPrice: basePrice
+                }));
+            } else {
+                structuredItems = [{
+                    variantId: 'default',
+                    sizeText: 'عام',
+                    quantity: 1,
+                    price: basePrice,
+                    originalPrice: basePrice
+                }];
+            }
         }
 
         // 3. Delivery Fee (15 for Tripoli/Janzour, 25 for others)
@@ -332,79 +359,27 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
 
         // 4. Financial Calculations
         const finalTotal = productTotal + deliveryFee - totalDiscount;
-        
-        let paymentSectionText = "";
         const payType = order.payMethodType;
 
-        if (payType === "CASH") {
-            paymentSectionText = `- طريقة الدفع: كاش عند الاستلام 💵
-- سعر المنتجات: ${productTotal} د.ل
-${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش): ${deliveryFee} د.ل
-- إجمالي الحساب كاش (عند الاستلام): ${finalTotal} د.ل`;
-        } else if (payType === "CARD" || payType === "TRANSFER") {
-            const methodLabel = payType === "CARD" ? "بطاقة مصرفية 💳" : "حوالة مصرفية 📲";
-            const paid = order.paidAdvance || 0;
-            const remaining = finalTotal - paid;
-            
-            paymentSectionText = `- طريقة الدفع: ${methodLabel}
-- سعر المنتجات: ${productTotal} د.ل
-${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
-- الإجمالي الكلي: ${finalTotal} د.ل
-- المدفوع مقدماً (${methodLabel}): ${paid} د.ل
-- المتبقي عند الاستلام: ${remaining} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
-        } else if (payType === "MIXED") {
-            const cardPart = order.cardAmount || 0;
-            const cashPart = Math.max(0, finalTotal - cardPart);
-            
-            paymentSectionText = `- طريقة الدفع: دفع مختلط (كاش + بطاقة) 🔄
-- سعر المنتجات: ${productTotal} د.ل
-${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
-- الإجمالي الكلي: ${finalTotal} د.ل
-- القيمة بالبطاقة (مدفوعة): ${cardPart} د.ل
-- المتبقي عند الاستلام (كاش): ${cashPart} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
-        } else if (payType === "ADVANCE") {
-            const paid = order.paidAdvance || 0;
-            const remaining = finalTotal - paid;
-            
-            paymentSectionText = `- طريقة الدفع: دفع جزء مقدماً (عربون) 💸
-- سعر المنتجات: ${productTotal} د.ل
-${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
-- الإجمالي الكلي: ${finalTotal} د.ل
-- القيمة المدفوعة مقدماً (عربون): ${paid} د.ل
-- المتبقي عند الاستلام (كاش): ${remaining} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
-        }
-
-        const formattedDate = new Date().toLocaleDateString('ar-LY', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit'
-        });
-
         const orderNum = ezoneOrderId ? `#${ezoneOrderId}` : `قيد المعالجة`;
+        const timestamp = Date.now();
+        const orderKeyId = `${timestamp}_${senderId}`;
+        const redisOrderKey = `final_order:${orderKeyId}`;
 
-        const invoiceMsg = `🧾 إيصال الحجز الإلكتروني - DaVinci Store 🧾
+        const finalHost = host || "da-vinci.ezone.ly";
+        const invoiceUrl = `https://${finalHost}/api/invoice?id=${orderKeyId}`;
+
+        const invoiceMsg = `🧾 تم تأكيد حجز طلبك بنجاح في DaVinci Store! 🧾
 ----------------------------------------
-رقم الطلب في النظام: ${orderNum}
-التاريخ: ${formattedDate}
+رقم الطلب: ${orderNum}
 
-👤 بيانات المستلم:
-- الاسم: ${order.name}
-- الهاتف: ${order.phone}
-- العنوان: ${order.location}
-${order.landmark ? `- نقطة دالة: ${order.landmark}` : ""}
+📌 يمكنك استعراض وتحميل فاتورة الحجز الإلكترونية الأنيقة والملونة مباشرة عبر هذا الرابط 👇:
+🔗 ${invoiceUrl}
 
-🛍️ تفاصيل المنتجات:
-- المنتج: ${order.productName} (كود: ${lastProd.sku || "غير محدد"})
-${itemsDetailsText}
+🚚 سيتصل بك موظف التأكيد ومندوب التوصيل قريباً لتنسيق موعد ومكان الاستلام. شكراً لثقتك بنا! 🌸`;
 
-💰 التفاصيل المالية:
-${paymentSectionText}
-----------------------------------------
-✅ تم تأكيد حجز البضاعة وتأمينها لك من المخزن بنجاح!
-🚚 سيتصل بك موظف تأكيد الطلبات ومندوب التوصيل لتنسيق موعد الاستلام قريباً. 🌸`;
-
-        // 5. Save the final order in Firebase
-        await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
+        // 5. Save the final order in Redis with structured details
+        await redis.set(redisOrderKey, JSON.stringify({
             name: order.name,
             phone: order.phone,
             location: order.location,
@@ -419,7 +394,12 @@ ${paymentSectionText}
             payMethodType: payType,
             paidAdvance: order.paidAdvance || 0,
             cardAmount: order.cardAmount || 0,
-            cashAmount: order.cashAmount || 0
+            cashAmount: order.cashAmount || 0,
+            productTotal: productTotal,
+            totalDiscount: totalDiscount,
+            deliveryFee: deliveryFee,
+            sku: lastProd.sku || "",
+            items: structuredItems
         }));
 
         // 6. Update Firebase Stock
@@ -447,7 +427,7 @@ ${paymentSectionText}
     }
 }
 
-async function handleMessage(event) {
+async function handleMessage(event, host) {
     const senderId = event.sender.id;
     const messageText = (event.message.text || "").trim();
     const quickReplyPayload = event.message.quick_reply ? event.message.quick_reply.payload : null;
@@ -802,7 +782,7 @@ async function handleMessage(event) {
 
                 if (payMethod === "CASH") {
                     order.paidAdvance = 0;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 } else if (payMethod === "CARD" || payMethod === "TRANSFER") {
                     await redis.set(stateKey, "ASKING_ADVANCE_TYPE");
                     await sendMessage(senderId, "هل قمت بدفع أي قيمة مقدماً (عربون)؟ 👇", [
@@ -848,13 +828,13 @@ async function handleMessage(event) {
 
                 if (advType === "NONE") {
                     order.paidAdvance = 0;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 } else if (advType === "HALF") {
                     order.paidAdvance = prodTotal / 2;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 } else if (advType === "FULL") {
                     order.paidAdvance = prodTotal;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 } else if (advType === "OTHER") {
                     await redis.set(stateKey, "ASKING_ADVANCE_AMOUNT");
                     await sendMessage(senderId, "يرجى كتابة قيمة العربون المدفوع مقدماً (مثلاً: 30):");
@@ -868,7 +848,7 @@ async function handleMessage(event) {
                     return;
                 }
                 order.paidAdvance = advAmount;
-                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 break;
 
             case "ASKING_MIXED_CARD_AMOUNT":
@@ -879,7 +859,7 @@ async function handleMessage(event) {
                 }
                 order.cardAmount = cardAmount;
                 order.paidAdvance = 0; // Mixed payment is at delivery
-                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 break;
             case "AWAITING_PRODUCT_INFO":
                 if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
@@ -997,8 +977,8 @@ module.exports = async (req, res) => {
                     }
                     if (entry.messaging) {
                         for (const ev of entry.messaging) {
-                            if (ev.message && !ev.message.is_echo) {
-                                await handleMessage(ev);
+                             if (ev.message && !ev.message.is_echo) {
+                                await handleMessage(ev, req.headers.host);
                             } else if (ev.postback) {
                                 await handlePostback(ev);
                             }
