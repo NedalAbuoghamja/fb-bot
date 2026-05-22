@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Redis = require('ioredis');
+const ezoneClient = require('./ezone_client');
 
 // Fallback Tokens & Config
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "EAAR90m9nfb4BRVbicflguLQadazJxXTfgrxyhnIXcPqJzF8YIsxvJGoQlo3niCQMNrk2ZAEJlrderf17cRDuiIVZAhh5pK8ZCd6KXfipFz8U8ZAzzRoLXLZBQXIsS4GZB8TFSvuxPTZB8TcGNQdpdY34o2KYrmHZA56tavAMZCHKYuk3qFGAJAmzM8zNfNKrWe36HnzIlXCxNle8RXKpK3wsPEimp";
@@ -216,18 +217,45 @@ async function handleMessage(event) {
                 order.date = new Date().toISOString();
                 order.status = "جديد";
 
-                // Save final order
+                let ezoneOrderId = null;
+                let variantText = "غير محدد";
+
+                if (lastProd.key) {
+                    try {
+                        console.log(`[Webhook] Automating order creation on Ezone for product ${lastProd.key}...`);
+                        const ezoneToken = await ezoneClient.getScopedToken(redis);
+                        const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
+                        const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
+                        const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine);
+                        
+                        const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
+                        const matchedVariant = ezoneClient.matchVariant(variants, order.notes, messageText);
+                        
+                        if (matchedVariant) {
+                            variantText = matchedVariant.text.trim();
+                            console.log(`[Webhook] Matched variant: ${variantText} (ID: ${matchedVariant.variantId})`);
+                            ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, lastProd.key, matchedVariant.variantId, 1);
+                        } else {
+                            console.log("[Webhook] No matching variants found.");
+                        }
+                    } catch (ezoneErr) {
+                        console.error("[Webhook] Ezone order integration failed:", ezoneErr.message);
+                    }
+                }
+
+                // Save final order in local dashboard
                 await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
                     name: order.name,
                     phone: order.phone,
                     location: order.location,
                     landmark: order.landmark,
                     notes: order.notes,
-                    details: `المنتج: ${order.productName} | السعر: ${order.productPrice}`,
+                    details: `المنتج: ${order.productName} (${variantText}) | السعر: ${order.productPrice} د.ل`,
                     price: order.productPrice,
                     img: order.productImg,
                     status: order.status,
-                    date: order.date
+                    date: order.date,
+                    ezoneOrderId: ezoneOrderId
                 }));
 
                 if (lastProd.cat && lastProd.key) {
@@ -242,7 +270,12 @@ async function handleMessage(event) {
                 }
 
                 await redis.del(stateKey, orderKey, `last_product:${senderId}`);
-                await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سنتصل بك قريباً لتأكيد الطلب.");
+                
+                if (ezoneOrderId) {
+                    await sendMessage(senderId, `✅ تم تسجيل طلبك بنجاح برقم: ${ezoneOrderId}! سنتصل بك قريباً لتأكيد الطلب.`);
+                } else {
+                    await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سنتصل بك قريباً لتأكيد الطلب.");
+                }
                 break;
         }
     } catch (e) { console.error("Message Error:", e.message); }
