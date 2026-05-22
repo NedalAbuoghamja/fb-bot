@@ -264,8 +264,9 @@ async function handleMessage(event) {
     const senderId = event.sender.id;
     const messageText = (event.message.text || "").trim();
     const quickReplyPayload = event.message.quick_reply ? event.message.quick_reply.payload : null;
+    const hasAttachments = event.message.attachments && event.message.attachments.length > 0;
     if (!redis) return;
-    if (!messageText && !quickReplyPayload) return;
+    if (!messageText && !quickReplyPayload && !hasAttachments) return;
 
     try {
         const stateKey = `user_state:${senderId}`;
