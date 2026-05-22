@@ -142,13 +142,11 @@ async function handleComment(event) {
             console.log("Sending public reply...");
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
             
-            console.log("Sending private reply via private_replies endpoint...");
-            let pReply = await makeRequest(`/${comment_id}/private_replies?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', { message: msg });
-            
-            if (!pReply) {
-                console.log("private_replies failed, falling back to /me/messages...");
-                await sendMessage(from.id, msg);
-            }
+            console.log("Sending private reply via Messages API...");
+            let pReply = await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                recipient: { comment_id },
+                message: { text: msg }
+            });
 
             if (redis) {
                 try {
