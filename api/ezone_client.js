@@ -196,7 +196,7 @@ async function findOrCreateCustomer(token, name, phone, email) {
 /**
  * Find address matching location or create a new one
  */
-async function findOrCreateAddress(token, customerId, locationLine, cityId = 1, subCityId = 102) {
+async function findOrCreateAddress(token, customerId, locationLine, cityId = 1, subCityId = null) {
     try {
         console.log(`[Ezone] Querying addresses for customer ${customerId}...`);
         const listRes = await fetch(`https://mapi.ezone.ly/customers/${customerId}/address/list?PageNumber=1&PageSize=10`, {
@@ -217,7 +217,7 @@ async function findOrCreateAddress(token, customerId, locationLine, cityId = 1, 
         }
 
         // Address not found or query failed, create new address
-        console.log(`[Ezone] Creating new address: "${cleanLine}"...`);
+        console.log(`[Ezone] Creating new address: "${cleanLine}" (City: ${cityId}, Sub-city: ${subCityId})...`);
         const createRes = await fetch(`https://mapi.ezone.ly/customers/${customerId}/address/new`, {
             method: 'POST',
             headers: {
@@ -249,6 +249,67 @@ async function findOrCreateAddress(token, customerId, locationLine, cityId = 1, 
         console.error("[Ezone] findOrCreateAddress Error:", e.message);
         throw e;
     }
+}
+
+/**
+ * Resolves cityId and subCityId based on text description of location and landmark
+ */
+async function resolveCityAndSubCity(token, location, landmark) {
+    let cityId = 1; // Default: طرابلس
+    let subCityId = null; 
+
+    try {
+        const combinedText = `${location || ""} ${landmark || ""}`;
+        const normText = normalizeArabic(combinedText);
+
+        // 1. Fetch cities
+        console.log("[Ezone] Resolving city ID from Ezone settings...");
+        const citiesRes = await fetch("https://mapi.ezone.ly/lookup/countries/1/cities", {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+        
+        if (citiesRes.status === 200) {
+            const citiesJson = await citiesRes.json();
+            const cities = citiesJson.data || [];
+            
+            for (const city of cities) {
+                const normCity = normalizeArabic(city.text);
+                const regex = new RegExp(`(?:^|\\s)${escapeRegExp(normCity)}(?:$|\\s)`, "i");
+                if (regex.test(normText)) {
+                    cityId = city.id;
+                    console.log(`[Ezone] Matched City: ${city.text} (ID: ${cityId})`);
+                    break;
+                }
+            }
+        }
+
+        // 2. Fetch subcities for the matched city
+        console.log(`[Ezone] Resolving sub-city ID for city ID ${cityId}...`);
+        const subRes = await fetch(`https://mapi.ezone.ly/lookup/cities/${cityId}/subcities`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+
+        if (subRes.status === 200) {
+            const subJson = await subRes.json();
+            const subcities = subJson.data || [];
+            
+            const sortedSubs = [...subcities].sort((a, b) => b.text.length - a.text.length);
+
+            for (const sub of sortedSubs) {
+                const normSub = normalizeArabic(sub.text);
+                const regex = new RegExp(`(?:^|\\s)${escapeRegExp(normSub)}(?:$|\\s)`, "i");
+                if (regex.test(normText)) {
+                    subCityId = sub.id;
+                    console.log(`[Ezone] Matched Sub-city: ${sub.text} (ID: ${subCityId})`);
+                    break;
+                }
+            }
+        }
+    } catch (e) {
+        console.error("[Ezone] resolveCityAndSubCity Error:", e.message);
+    }
+
+    return { cityId, subCityId };
 }
 
 /**
@@ -556,6 +617,7 @@ module.exports = {
     getScopedToken,
     findOrCreateCustomer,
     findOrCreateAddress,
+    resolveCityAndSubCity,
     getVariants,
     matchVariant,
     matchMultipleVariants,

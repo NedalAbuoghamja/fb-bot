@@ -468,8 +468,9 @@ async function handleMessage(event) {
                         const ezoneToken = await ezoneClient.getScopedToken(redis);
                         
                         const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
+                        const { cityId, subCityId } = await ezoneClient.resolveCityAndSubCity(ezoneToken, order.location, order.landmark);
                         const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
-                        const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine);
+                        const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine, cityId, subCityId);
                         
                         const ezoneItems = order.items.map(item => ({
                             productId: lastProd.key,
