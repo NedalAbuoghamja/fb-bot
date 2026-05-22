@@ -7,6 +7,34 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "davinci_token_2024";
 const FB_PAGE_ID = process.env.FB_PAGE_ID || "110508451733432";
 const FB_DB_URL = "https://davinci-a9db7-default-rtdb.firebaseio.com";
 
+const API_KEY = "AIzaSyAcP3Ud60BC-RKD7bYVBx8bcro--L4mkLQ";
+const EMAIL = "nedal@davinci.com";
+const PASSWORD = "111111";
+
+let cachedToken = null;
+let tokenExpiresAt = 0;
+
+async function getFirebaseAuthToken() {
+    if (cachedToken && Date.now() < tokenExpiresAt) {
+        return cachedToken;
+    }
+    try {
+        console.log("Signing in to Firebase Auth...");
+        const res = await axios.post(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, {
+            email: EMAIL,
+            password: PASSWORD,
+            returnSecureToken: true
+        });
+        cachedToken = res.data.idToken;
+        const expiresIn = parseInt(res.data.expiresIn) || 3600;
+        tokenExpiresAt = Date.now() + (expiresIn * 1000) - 300000;
+        return cachedToken;
+    } catch (e) {
+        console.error("Firebase Auth failed:", e.response ? e.response.data : e.message);
+        throw e;
+    }
+}
+
 // Redis with Error Handling
 let redis = null;
 if (process.env.REDIS_URL) {
@@ -87,7 +115,8 @@ async function handleComment(event) {
     if (!message || from.id === FB_PAGE_ID) return;
 
     try {
-        const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json`, { timeout: 5000 });
+        const token = await getFirebaseAuthToken();
+        const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
         const categories = fbRes.data || {};
         
         const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`, 'GET');
@@ -205,10 +234,11 @@ async function handleMessage(event) {
 
                 if (lastProd.cat && lastProd.key) {
                     try {
-                        const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json`);
+                        const token = await getFirebaseAuthToken();
+                        const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`);
                         const currentStock = parseInt(stockRes.data) || 0;
                         if (currentStock > 0) {
-                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json`, currentStock - 1);
+                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - 1);
                         }
                     } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
                 }
