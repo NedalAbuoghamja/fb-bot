@@ -554,5 +554,6 @@ module.exports = {
     getVariants,
     matchVariant,
     matchMultipleVariants,
-    placeOrder
+    placeOrder,
+    normalizeArabic
 };
