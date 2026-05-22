@@ -260,6 +260,193 @@ async function sendSizeSelection(senderId, redis, lastProd, stateKey, isFirstTim
     }
 }
 
+async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey) {
+    try {
+        let ezoneOrderId = null;
+        let variantText = "غير محدد";
+        let totalQty = 0;
+        let cityId = 1;
+
+        if (order.items && order.items.length > 0) {
+            totalQty = order.items.reduce((sum, item) => sum + item.quantity, 0);
+        } else {
+            totalQty = 1;
+        }
+
+        // 1. Automate Ezone order creation
+        if (lastProd.key && order.items && order.items.length > 0) {
+            try {
+                console.log(`[Webhook] Automating order creation on Ezone for product ${lastProd.key}...`);
+                const ezoneToken = await ezoneClient.getScopedToken(redis);
+                
+                const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
+                const cityRes = await ezoneClient.resolveCityAndSubCity(ezoneToken, order.location, order.landmark);
+                cityId = cityRes.cityId;
+                const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim(), cityId, cityRes.subCityId);
+                
+                const ezoneItems = order.items.map(item => ({
+                    productId: lastProd.key,
+                    variantId: item.variantId,
+                    quantity: item.quantity
+                }));
+
+                ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, ezoneItems);
+            } catch (ezoneErr) {
+                console.error("[Webhook] Ezone order integration failed:", ezoneErr.message);
+            }
+        }
+
+        // 2. Fetch variants for accurate prices & discounts
+        let productTotal = 0;
+        let totalDiscount = 0;
+        let itemsDetailsText = "";
+
+        try {
+            const ezoneToken = await ezoneClient.getScopedToken(redis);
+            const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
+            
+            if (order.items && order.items.length > 0) {
+                itemsDetailsText = order.items.map(item => {
+                    const v = variants.find(varObj => String(varObj.variantId) === String(item.variantId));
+                    const price = v ? v.price : (parseFloat(lastProd.price) || 0);
+                    const originalPrice = v ? (v.originalPrice || v.price) : price;
+                    
+                    productTotal += price * item.quantity;
+                    if (originalPrice > price) {
+                        totalDiscount += (originalPrice - price) * item.quantity;
+                    }
+                    
+                    return `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`;
+                }).join("\n");
+                variantText = order.items.map(item => `${item.sizeText.trim()} (عدد: ${item.quantity})`).join(", ");
+            }
+        } catch (err) {
+            console.error("[Webhook] Failed to calculate dynamic prices, using fallback:", err.message);
+            const basePrice = parseFloat(lastProd.price) || 0;
+            productTotal = basePrice * totalQty;
+            itemsDetailsText = order.items ? order.items.map(item => `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`).join("\n") : "  - الكمية: 1";
+        }
+
+        // 3. Delivery Fee (15 for Tripoli/Janzour, 25 for others)
+        const deliveryFee = (cityId === 1 || cityId === 6) ? 15 : 25;
+
+        // 4. Financial Calculations
+        const finalTotal = productTotal + deliveryFee - totalDiscount;
+        
+        let paymentSectionText = "";
+        const payType = order.payMethodType;
+
+        if (payType === "CASH") {
+            paymentSectionText = `- طريقة الدفع: كاش عند الاستلام 💵
+- سعر المنتجات: ${productTotal} د.ل
+${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش): ${deliveryFee} د.ل
+- إجمالي الحساب كاش (عند الاستلام): ${finalTotal} د.ل`;
+        } else if (payType === "CARD" || payType === "TRANSFER") {
+            const methodLabel = payType === "CARD" ? "بطاقة مصرفية 💳" : "حوالة مصرفية 📲";
+            const paid = order.paidAdvance || 0;
+            const remaining = finalTotal - paid;
+            
+            paymentSectionText = `- طريقة الدفع: ${methodLabel}
+- سعر المنتجات: ${productTotal} د.ل
+${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
+- الإجمالي الكلي: ${finalTotal} د.ل
+- المدفوع مقدماً (${methodLabel}): ${paid} د.ل
+- المتبقي عند الاستلام: ${remaining} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
+        } else if (payType === "MIXED") {
+            const cardPart = order.cardAmount || 0;
+            const cashPart = Math.max(0, finalTotal - cardPart);
+            
+            paymentSectionText = `- طريقة الدفع: دفع مختلط (كاش + بطاقة) 🔄
+- سعر المنتجات: ${productTotal} د.ل
+${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
+- الإجمالي الكلي: ${finalTotal} د.ل
+- القيمة بالبطاقة (مدفوعة): ${cardPart} د.ل
+- المتبقي عند الاستلام (كاش): ${cashPart} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
+        } else if (payType === "ADVANCE") {
+            const paid = order.paidAdvance || 0;
+            const remaining = finalTotal - paid;
+            
+            paymentSectionText = `- طريقة الدفع: دفع جزء مقدماً (عربون) 💸
+- سعر المنتجات: ${productTotal} د.ل
+${totalDiscount > 0 ? `- التخفيض: -${totalDiscount} د.ل\n` : ""}- سعر التوصيل (كاش دائماً): ${deliveryFee} د.ل
+- الإجمالي الكلي: ${finalTotal} د.ل
+- القيمة المدفوعة مقدماً (عربون): ${paid} د.ل
+- المتبقي عند الاستلام (كاش): ${remaining} د.ل (منها ${deliveryFee} د.ل توصيل كاش فقط)`;
+        }
+
+        const formattedDate = new Date().toLocaleDateString('ar-LY', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+
+        const orderNum = ezoneOrderId ? `#${ezoneOrderId}` : `قيد المعالجة`;
+
+        const invoiceMsg = `🧾 إيصال الحجز الإلكتروني - DaVinci Store 🧾
+----------------------------------------
+رقم الطلب في النظام: ${orderNum}
+التاريخ: ${formattedDate}
+
+👤 بيانات المستلم:
+- الاسم: ${order.name}
+- الهاتف: ${order.phone}
+- العنوان: ${order.location}
+${order.landmark ? `- نقطة دالة: ${order.landmark}` : ""}
+
+🛍️ تفاصيل المنتجات:
+- المنتج: ${order.productName} (كود: ${lastProd.sku || "غير محدد"})
+${itemsDetailsText}
+
+💰 التفاصيل المالية:
+${paymentSectionText}
+----------------------------------------
+✅ تم تأكيد حجز البضاعة وتأمينها لك من المخزن بنجاح!
+🚚 سيتصل بك موظف تأكيد الطلبات ومندوب التوصيل لتنسيق موعد الاستلام قريباً. 🌸`;
+
+        // 5. Save the final order in Firebase
+        await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
+            name: order.name,
+            phone: order.phone,
+            location: order.location,
+            landmark: order.landmark,
+            notes: order.notes,
+            details: `المنتج: ${order.productName} (${variantText}) | الكمية الإجمالية: ${totalQty} | السعر الإجمالي: ${finalTotal} د.ل`,
+            price: finalTotal,
+            img: order.productImg,
+            status: order.status,
+            date: order.date,
+            ezoneOrderId: ezoneOrderId,
+            payMethodType: payType,
+            paidAdvance: order.paidAdvance || 0,
+            cardAmount: order.cardAmount || 0,
+            cashAmount: order.cashAmount || 0
+        }));
+
+        // 6. Update Firebase Stock
+        if (lastProd.cat && lastProd.key) {
+            try {
+                const token = await getFirebaseAuthToken();
+                const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`);
+                const currentStock = parseInt(stockRes.data) || 0;
+                if (currentStock >= totalQty) {
+                    await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - totalQty);
+                }
+            } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
+        }
+
+        // 7. Cleanup Redis states
+        await redis.del(stateKey, orderKey, `last_product:${senderId}`);
+
+        // 8. Send Invoice
+        await sendMessage(senderId, invoiceMsg);
+
+    } catch (criticalErr) {
+        console.error("[Webhook] critical error in finishOrderCreation:", criticalErr.message);
+        await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سيتصل بك موظف التأكيد لتأكيد الاستلام والدفع.");
+        await redis.del(stateKey, orderKey, `last_product:${senderId}`);
+    }
+}
+
 async function handleMessage(event) {
     const senderId = event.sender.id;
     const messageText = (event.message.text || "").trim();
@@ -569,113 +756,130 @@ async function handleMessage(event) {
 
             case "ASKING_NOTES":
                 order.notes = messageText;
-                order.productName = lastProd.name || "غير محدد";
-                order.productPrice = parseFloat(lastProd.price) || 0;
-                order.productImg = lastProd.img || "";
                 order.date = new Date().toISOString();
                 order.status = "جديد";
-
-                let ezoneOrderId = null;
-                let variantText = "غير محدد";
-                let totalQty = 0;
-
-                if (order.items && order.items.length > 0) {
-                    totalQty = order.items.reduce((sum, item) => sum + item.quantity, 0);
-                    variantText = order.items.map(item => `${item.sizeText.trim()} (عدد: ${item.quantity})`).join(", ");
-                } else {
-                    totalQty = 1;
-                }
-
-                if (lastProd.key && order.items && order.items.length > 0) {
-                    try {
-                        console.log(`[Webhook] Automating order creation on Ezone for product ${lastProd.key}...`);
-                        const ezoneToken = await ezoneClient.getScopedToken(redis);
-                        
-                        const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
-                        const { cityId, subCityId } = await ezoneClient.resolveCityAndSubCity(ezoneToken, order.location, order.landmark);
-                        const addressLine = `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim();
-                        const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, addressLine, cityId, subCityId);
-                        
-                        const ezoneItems = order.items.map(item => ({
-                            productId: lastProd.key,
-                            variantId: item.variantId,
-                            quantity: item.quantity
-                        }));
-
-                        ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, ezoneItems);
-                    } catch (ezoneErr) {
-                        console.error("[Webhook] Ezone order integration failed:", ezoneErr.message);
-                    }
-                }
-
-                const totalPrice = order.productPrice * totalQty;
+                order.productImg = lastProd.img || "";
+                order.productName = lastProd.name || "غير محدد";
+                order.productPrice = parseFloat(lastProd.price) || 0;
+                await redis.set(orderKey, JSON.stringify(order));
                 
-                await redis.set(`final_order:${Date.now()}_${senderId}`, JSON.stringify({
-                    name: order.name,
-                    phone: order.phone,
-                    location: order.location,
-                    landmark: order.landmark,
-                    notes: order.notes,
-                    details: `المنتج: ${order.productName} (${variantText}) | الكمية الإجمالية: ${totalQty} | السعر الإجمالي: ${totalPrice} د.ل`,
-                    price: totalPrice,
-                    img: order.productImg,
-                    status: order.status,
-                    date: order.date,
-                    ezoneOrderId: ezoneOrderId
-                }));
+                await redis.set(stateKey, "ASKING_PAYMENT_METHOD");
+                await sendMessage(senderId, "الرجاء اختيار طريقة دفع قيمة المنتج 👇:", [
+                    { title: "💵 كاش عند الاستلام", payload: "PAYMENT:CASH" },
+                    { title: "💳 بطاقة مصرفية", payload: "PAYMENT:CARD" },
+                    { title: "📲 حوالة مصرفية", payload: "PAYMENT:TRANSFER" },
+                    { title: "🔄 كاش + بطاقة", payload: "PAYMENT:MIXED" },
+                    { title: "💸 دفع جزء مقدماً", payload: "PAYMENT:ADVANCE" }
+                ]);
+                break;
 
-                if (lastProd.cat && lastProd.key) {
-                    try {
-                        const token = await getFirebaseAuthToken();
-                        const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`);
-                        const currentStock = parseInt(stockRes.data) || 0;
-                        if (currentStock >= totalQty) {
-                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - totalQty);
-                        }
-                    } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
-                }
-
-                const formattedDate = new Date().toLocaleDateString('ar-LY', {
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit'
-                });
-
-                let itemsDetailsText = "";
-                if (order.items && order.items.length > 0) {
-                    itemsDetailsText = order.items.map(item => `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`).join("\n");
+            case "ASKING_PAYMENT_METHOD":
+                let payMethod = null;
+                if (quickReplyPayload && quickReplyPayload.startsWith("PAYMENT:")) {
+                    payMethod = quickReplyPayload.split(":")[1];
                 } else {
-                    itemsDetailsText = "  - الكمية: 1";
+                    const norm = ezoneClient.normalizeArabic(messageText);
+                    if (norm.includes("كاش") && norm.includes("بطاق")) payMethod = "MIXED";
+                    else if (norm.includes("كاش")) payMethod = "CASH";
+                    else if (norm.includes("بطاق")) payMethod = "CARD";
+                    else if (norm.includes("حوال")) payMethod = "TRANSFER";
+                    else if (norm.includes("جزء") || norm.includes("عربون") || norm.includes("مقدم")) payMethod = "ADVANCE";
                 }
 
-                const orderNum = ezoneOrderId ? `#${ezoneOrderId}` : `قيد المعالجة`;
+                if (!payMethod) {
+                    await sendMessage(senderId, "⚠️ الرجاء اختيار أحد خيارات الدفع المتاحة من الأزرار 👇:", [
+                        { title: "💵 كاش عند الاستلام", payload: "PAYMENT:CASH" },
+                        { title: "💳 بطاقة مصرفية", payload: "PAYMENT:CARD" },
+                        { title: "📲 حوالة مصرفية", payload: "PAYMENT:TRANSFER" },
+                        { title: "🔄 كاش + بطاقة", payload: "PAYMENT:MIXED" },
+                        { title: "💸 دفع جزء مقدماً", payload: "PAYMENT:ADVANCE" }
+                    ]);
+                    return;
+                }
 
-                const invoiceMsg = `🧾 إيصال الحجز الإلكتروني - DaVinci Store 🧾
-----------------------------------------
-رقم الطلب في النظام: ${orderNum}
-التاريخ: ${formattedDate}
+                order.payMethodType = payMethod;
+                await redis.set(orderKey, JSON.stringify(order));
 
-👤 بيانات المستلم:
-- الاسم: ${order.name}
-- الهاتف: ${order.phone}
-- العنوان: ${order.location}
-${order.landmark ? `- نقطة دالة: ${order.landmark}` : ""}
+                if (payMethod === "CASH") {
+                    order.paidAdvance = 0;
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                } else if (payMethod === "CARD" || payMethod === "TRANSFER") {
+                    await redis.set(stateKey, "ASKING_ADVANCE_TYPE");
+                    await sendMessage(senderId, "هل قمت بدفع أي قيمة مقدماً (عربون)؟ 👇", [
+                        { title: "❌ لا، لا يوجد", payload: "ADVANCE:NONE" },
+                        { title: "½ نصف القيمة", payload: "ADVANCE:HALF" },
+                        { title: "💰 كامل القيمة", payload: "ADVANCE:FULL" },
+                        { title: "💵 قيمة أخرى", payload: "ADVANCE:OTHER" }
+                    ]);
+                } else if (payMethod === "MIXED") {
+                    await redis.set(stateKey, "ASKING_MIXED_CARD_AMOUNT");
+                    await sendMessage(senderId, "يرجى كتابة القيمة المراد دفعها بالبطاقة (مثلاً: 50):");
+                } else if (payMethod === "ADVANCE") {
+                    await redis.set(stateKey, "ASKING_ADVANCE_AMOUNT");
+                    await sendMessage(senderId, "يرجى كتابة قيمة العربون المدفوع مقدماً (مثلاً: 40):");
+                }
+                break;
 
-🛍️ تفاصيل المنتجات:
-- المنتج: ${order.productName} (كود: ${lastProd.sku || "غير محدد"})
-${itemsDetailsText}
+            case "ASKING_ADVANCE_TYPE":
+                let advType = null;
+                if (quickReplyPayload && quickReplyPayload.startsWith("ADVANCE:")) {
+                    advType = quickReplyPayload.split(":")[1];
+                } else {
+                    const norm = ezoneClient.normalizeArabic(messageText);
+                    if (norm.includes("نصف") || norm.includes("نص")) advType = "HALF";
+                    else if (norm.includes("كامل") || norm.includes("كل")) advType = "FULL";
+                    else if (norm.includes("لا") || norm.includes("ما في") || norm.includes("لا يوجد")) advType = "NONE";
+                    else if (norm.includes("اخر") || norm.includes("أخرى")) advType = "OTHER";
+                }
 
-💰 التفاصيل المالية:
-- السعر الفردي: ${order.productPrice} د.ل
-- الكمية الإجمالية: ${totalQty} قطع
-- إجمالي الحساب: ${totalPrice} د.ل
-----------------------------------------
-✅ تم تأكيد حجز البضاعة وتأمينها لك من المخزن بنجاح!
-🚚 سيتصل بك موظف تأكيد الطلبات ومندوب التوصيل لتنسيق موعد الاستلام قريباً. 🌸`;
+                if (!advType) {
+                    await sendMessage(senderId, "⚠️ الرجاء الاختيار من الأزرار 👇:", [
+                        { title: "❌ لا، لا يوجد", payload: "ADVANCE:NONE" },
+                        { title: "½ نصف القيمة", payload: "ADVANCE:HALF" },
+                        { title: "💰 كامل القيمة", payload: "ADVANCE:FULL" },
+                        { title: "💵 قيمة أخرى", payload: "ADVANCE:OTHER" }
+                    ]);
+                    return;
+                }
 
-                await redis.del(stateKey, orderKey, `last_product:${senderId}`);
+                const prodPrice = parseFloat(lastProd.price) || 0;
+                const itemsCount = (order.items || []).reduce((sum, item) => sum + item.quantity, 0) || 1;
+                const prodTotal = prodPrice * itemsCount;
 
-                await sendMessage(senderId, invoiceMsg);
+                if (advType === "NONE") {
+                    order.paidAdvance = 0;
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                } else if (advType === "HALF") {
+                    order.paidAdvance = prodTotal / 2;
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                } else if (advType === "FULL") {
+                    order.paidAdvance = prodTotal;
+                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                } else if (advType === "OTHER") {
+                    await redis.set(stateKey, "ASKING_ADVANCE_AMOUNT");
+                    await sendMessage(senderId, "يرجى كتابة قيمة العربون المدفوع مقدماً (مثلاً: 30):");
+                }
+                break;
+
+            case "ASKING_ADVANCE_AMOUNT":
+                const advAmount = parseFloat(messageText);
+                if (isNaN(advAmount) || advAmount < 0) {
+                    await sendMessage(senderId, "⚠️ الرجاء إدخال رقم صحيح لقيمة العربون (مثلاً: 45):");
+                    return;
+                }
+                order.paidAdvance = advAmount;
+                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
+                break;
+
+            case "ASKING_MIXED_CARD_AMOUNT":
+                const cardAmount = parseFloat(messageText);
+                if (isNaN(cardAmount) || cardAmount < 0) {
+                    await sendMessage(senderId, "⚠️ الرجاء إدخال رقم صحيح للقيمة المدفوعة بالبطاقة (مثلاً: 50):");
+                    return;
+                }
+                order.cardAmount = cardAmount;
+                order.paidAdvance = 0; // Mixed payment is at delivery
+                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey);
                 break;
             case "AWAITING_PRODUCT_INFO":
                 if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
