@@ -635,13 +635,47 @@ async function handleMessage(event) {
                     } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
                 }
 
-                await redis.del(stateKey, orderKey, `last_product:${senderId}`);
-                
-                if (ezoneOrderId) {
-                    await sendMessage(senderId, `✅ تم تسجيل طلبك بنجاح برقم: ${ezoneOrderId}! سنتصل بك قريباً لتأكيد الطلب.`);
+                const formattedDate = new Date().toLocaleDateString('ar-LY', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit'
+                });
+
+                let itemsDetailsText = "";
+                if (order.items && order.items.length > 0) {
+                    itemsDetailsText = order.items.map(item => `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`).join("\n");
                 } else {
-                    await sendMessage(senderId, "✅ تم تسجيل طلبك بنجاح! سنتصل بك قريباً لتأكيد الطلب.");
+                    itemsDetailsText = "  - الكمية: 1";
                 }
+
+                const orderNum = ezoneOrderId ? `#${ezoneOrderId}` : `قيد المعالجة`;
+
+                const invoiceMsg = `🧾 إيصال الحجز الإلكتروني - DaVinci Store 🧾
+----------------------------------------
+رقم الطلب في النظام: ${orderNum}
+التاريخ: ${formattedDate}
+
+👤 بيانات المستلم:
+- الاسم: ${order.name}
+- الهاتف: ${order.phone}
+- العنوان: ${order.location}
+${order.landmark ? `- نقطة دالة: ${order.landmark}` : ""}
+
+🛍️ تفاصيل المنتجات:
+- المنتج: ${order.productName} (كود: ${lastProd.sku || "غير محدد"})
+${itemsDetailsText}
+
+💰 التفاصيل المالية:
+- السعر الفردي: ${order.productPrice} د.ل
+- الكمية الإجمالية: ${totalQty} قطع
+- إجمالي الحساب: ${totalPrice} د.ل
+----------------------------------------
+✅ تم تأكيد حجز البضاعة وتأمينها لك من المخزن بنجاح!
+🚚 سيتصل بك موظف تأكيد الطلبات ومندوب التوصيل لتنسيق موعد الاستلام قريباً. 🌸`;
+
+                await redis.del(stateKey, orderKey, `last_product:${senderId}`);
+
+                await sendMessage(senderId, invoiceMsg);
                 break;
             case "AWAITING_PRODUCT_INFO":
                 if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
