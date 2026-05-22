@@ -138,9 +138,14 @@ async function findOrCreateCustomer(token, name, phone, email) {
         if (searchRes.status === 200) {
             const searchJson = await searchRes.json();
             const items = searchJson.data && searchJson.data.items ? searchJson.data.items : [];
-            const exactMatch = items.find(item => item.phoneNo === phone || item.phoneNo2 === phone);
+            const normSearchName = normalizeArabic(name);
+            const exactMatch = items.find(item => {
+                const matchPhone = (item.phoneNo === phone || item.phoneNo2 === phone);
+                if (!matchPhone) return false;
+                return normalizeArabic(item.name) === normSearchName;
+            });
             if (exactMatch) {
-                console.log(`[Ezone] Customer found: ID ${exactMatch.id}`);
+                console.log(`[Ezone] Customer found: ID ${exactMatch.id} (Name: ${exactMatch.name})`);
                 return exactMatch.id;
             }
         }
