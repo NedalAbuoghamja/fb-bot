@@ -105,9 +105,24 @@ async function sendMessage(psid, message, quickReplies = null) {
 }
 
 function findProduct(categories, searchText, postText = "") {
-    const searchLower = searchText.toLowerCase();
-    const postLower = postText.toLowerCase();
-    const fullText = searchLower + " " + postLower;
+    const convertArabicNumerals = (text) => {
+        if (!text) return "";
+        const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+        return text.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
+    };
+
+    let cleanSearch = convertArabicNumerals(searchText).toLowerCase();
+    // Separate letters and digits for both English and Arabic unicode characters (e.g. كود51 -> كود 51)
+    cleanSearch = cleanSearch
+        .replace(/([\u0600-\u06FFa-zA-Z])(\d)/g, '$1 $2')
+        .replace(/(\d)([\u0600-\u06FFa-zA-Z])/g, '$1 $2');
+
+    let cleanPost = convertArabicNumerals(postText).toLowerCase();
+    cleanPost = cleanPost
+        .replace(/([\u0600-\u06FFa-zA-Z])(\d)/g, '$1 $2')
+        .replace(/(\d)([\u0600-\u06FFa-zA-Z])/g, '$1 $2');
+
+    const fullText = cleanSearch + " " + cleanPost;
     
     let bestMatch = null;
 
