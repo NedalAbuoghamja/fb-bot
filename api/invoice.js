@@ -711,7 +711,7 @@ module.exports = async (req, res) => {
         <div class="footer-section">
             <div class="thanks-msg">شكراً لاختياركم دافينشي • DAVINCI</div>
             <div class="footer-address">طرابلس - ليبيا</div>
-            <div class="footer-contact">خدمة العملاء: 0912925662</div>
+            <div class="footer-contact">خدمة العملاء: 0924202921</div>
             <div class="footer-watermark">DAVINCI POS PREMIUM EDITION</div>
         </div>
         
