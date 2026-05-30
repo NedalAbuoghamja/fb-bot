@@ -124,15 +124,24 @@ function findProduct(categories, searchText, postText = "") {
 
     const fullText = cleanSearch + " " + cleanPost;
     
-    let bestMatch = null;
-
     const isWholeWordMatch = (target, text) => {
         if (!target) return false;
         const escapedTarget = target.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
         const regex = new RegExp(`(^|\\s|[\\.,!\\?،]|\\-|#)${escapedTarget}($|\\s|[\\.,!\\?،]|\\-|#)`, 'i');
         return regex.test(text);
     };
+    
+    // First pass: strictly check the user's comment (cleanSearch)
+    for (let catName in categories) {
+        for (let prodKey in categories[catName]) {
+            const p = categories[catName][prodKey];
+            const sku = p.sku ? String(p.sku).toLowerCase() : "";
+            if (sku && isWholeWordMatch(sku, cleanSearch)) return { ...p, cat: catName, key: prodKey };
+        }
+    }
 
+    // Second pass: check the post text (for single-product posts where user just says "حجز")
+    let bestMatch = null;
     for (let catName in categories) {
         for (let prodKey in categories[catName]) {
             const p = categories[catName][prodKey];
@@ -180,6 +189,12 @@ async function handleComment(event) {
         const postText = postInfo ? (postInfo.message || "") : "";
         
         const product = findProduct(categories, message, postText);
+
+        // Handle collection post if user didn't specify a code
+        if (!product && (postText.includes("تشكيلة مميزة") || postText.includes("كل صورة عليها كود"))) {
+            await replyToCommentPublicly(comment_id, "مرحباً بك! يرجى تحديد كود المنتج الذي ترغب بحجزه في تعليق (مثال: حجز كود 58) لكي يقوم البوت بإتمام الحجز لك 🌸");
+            return;
+        }
 
         if (product) {
             await likeComment(comment_id);
