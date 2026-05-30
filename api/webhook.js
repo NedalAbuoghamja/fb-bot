@@ -178,7 +178,8 @@ function findProductByFBPostLink(categories, text) {
 
 async function handleComment(event) {
     const { post_id, comment_id, from, message } = event;
-    if (!message || from.id === FB_PAGE_ID) return;
+    if (from.id === FB_PAGE_ID) return;
+    const userMessage = message || "";
 
     try {
         const token = await getFirebaseAuthToken();
@@ -188,11 +189,21 @@ async function handleComment(event) {
         const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`, 'GET');
         const postText = postInfo ? (postInfo.message || "") : "";
         
-        const product = findProduct(categories, message, postText);
+        const product = findProduct(categories, userMessage, postText);
 
         // Handle collection post if user didn't specify a code
         if (!product && (postText.includes("تشكيلة مميزة") || postText.includes("كل صورة عليها كود"))) {
             await replyToCommentPublicly(comment_id, "مرحباً بك! يرجى تحديد كود المنتج الذي ترغب بحجزه في تعليق (مثال: حجز كود 58) لكي يقوم البوت بإتمام الحجز لك 🌸");
+            return;
+        }
+
+        if (!product) {
+            const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا تواصلك معنا. للحجز أو الاستفسار يرجى مراسلتنا هنا في الخاص أو كتابة "كود المنتج" الذي ترغب به في تعليق.`;
+            await replyToCommentPublicly(comment_id, "تم الرد على الخاص 🌹");
+            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                recipient: { comment_id },
+                message: { text: generalReplyMsg }
+            });
             return;
         }
 
