@@ -124,8 +124,8 @@ module.exports = async (req, res) => {
             const price = parseFloat(item.price) || parseFloat(order.productPrice) || 0;
             const originalPrice = parseFloat(item.originalPrice) || price;
             return {
-                name: order.productName || 'منتج دافينشي',
-                sku: order.sku || 'SKU',
+                name: item.productName || order.productName || 'منتج دافينشي',
+                sku: item.sku || order.sku || 'SKU',
                 variant: `مقاس: ${item.sizeText || 'عام'}`,
                 quantity: item.quantity || 1,
                 price: price,

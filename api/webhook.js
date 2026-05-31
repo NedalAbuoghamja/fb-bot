@@ -327,18 +327,24 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
         }
 
         // 1. Automate Ezone order creation
-        if (lastProd.key && order.items && order.items.length > 0) {
+        if (order.items && order.items.length > 0) {
             try {
-                console.log(`[Webhook] Automating order creation on Ezone for product ${lastProd.key}...`);
+                console.log(`[Webhook] Automating order creation on Ezone...`);
                 const ezoneToken = await ezoneClient.getScopedToken(redis);
                 
-                const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, order.phone, '');
+                // Clean the phone number (just in case)
+                const rawPhone = order.phone || "";
+                const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+                let cleanedPhone = rawPhone.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
+                cleanedPhone = cleanedPhone.replace(/\D/g, ''); 
+
+                const ezoneCustomerId = await ezoneClient.findOrCreateCustomer(ezoneToken, order.name, cleanedPhone, '');
                 const cityRes = await ezoneClient.resolveCityAndSubCity(ezoneToken, order.location, order.landmark);
                 cityId = cityRes.cityId;
                 const ezoneAddressId = await ezoneClient.findOrCreateAddress(ezoneToken, ezoneCustomerId, `${order.location} (${order.landmark ? 'نقطة دالة: ' + order.landmark : ''})`.trim(), cityId, cityRes.subCityId);
                 
                 const ezoneItems = order.items.map(item => ({
-                    productId: lastProd.key,
+                    productId: item.productId,
                     variantId: item.variantId,
                     quantity: item.quantity
                 }));
@@ -357,12 +363,23 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
 
         try {
             const ezoneToken = await ezoneClient.getScopedToken(redis);
-            const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
+            
+            // Group items by productId to fetch variants once
+            const productIds = [...new Set(order.items.map(item => item.productId))];
+            const productVariants = {};
+            for (const pid of productIds) {
+                try {
+                    productVariants[pid] = await ezoneClient.getVariants(ezoneToken, pid);
+                } catch (e) {
+                    productVariants[pid] = [];
+                }
+            }
             
             if (order.items && order.items.length > 0) {
                 itemsDetailsText = order.items.map(item => {
-                    const v = variants.find(varObj => String(varObj.variantId) === String(item.variantId));
-                    const price = v ? v.price : (parseFloat(lastProd.price) || 0);
+                    const vars = productVariants[item.productId] || [];
+                    const v = vars.find(varObj => String(varObj.variantId) === String(item.variantId));
+                    const price = v ? v.price : (parseFloat(item.price) || 0);
                     const originalPrice = v ? (v.originalPrice || v.price) : price;
                     
                     productTotal += price * item.quantity;
@@ -371,6 +388,9 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
                     }
 
                     structuredItems.push({
+                        productId: item.productId,
+                        productName: item.productName || order.productName || "غير محدد",
+                        sku: item.sku || order.sku || "",
                         variantId: item.variantId,
                         sizeText: item.sizeText,
                         quantity: item.quantity,
@@ -378,32 +398,27 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
                         originalPrice: originalPrice
                     });
                     
-                    return `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`;
+                    return `  - كود ${item.sku || order.sku} (مقاس: ${item.sizeText.trim()} | الكمية: ${item.quantity} | السعر: ${price} د.ل)`;
                 }).join("\n");
-                variantText = order.items.map(item => `${item.sizeText.trim()} (عدد: ${item.quantity})`).join(", ");
+                variantText = order.items.map(item => `كود ${item.sku || order.sku}: ${item.sizeText.trim()} (عدد: ${item.quantity})`).join(", ");
             }
         } catch (err) {
             console.error("[Webhook] Failed to calculate dynamic prices, using fallback:", err.message);
             const basePrice = parseFloat(lastProd.price) || 0;
             productTotal = basePrice * totalQty;
-            itemsDetailsText = order.items ? order.items.map(item => `  - مقاس ${item.sizeText.trim()} (الكمية: ${item.quantity})`).join("\n") : "  - الكمية: 1";
+            itemsDetailsText = order.items ? order.items.map(item => `  - كود ${item.sku || order.sku} (مقاس: ${item.sizeText.trim()} | الكمية: ${item.quantity})`).join("\n") : "  - الكمية: 1";
             
             if (order.items && order.items.length > 0) {
                 structuredItems = order.items.map(item => ({
+                    productId: item.productId,
+                    productName: item.productName || order.productName || "غير محدد",
+                    sku: item.sku || order.sku || "",
                     variantId: item.variantId,
                     sizeText: item.sizeText,
                     quantity: item.quantity,
-                    price: basePrice,
-                    originalPrice: basePrice
+                    price: parseFloat(item.price) || basePrice,
+                    originalPrice: parseFloat(item.price) || basePrice
                 }));
-            } else {
-                structuredItems = [{
-                    variantId: 'default',
-                    sizeText: 'عام',
-                    quantity: 1,
-                    price: basePrice,
-                    originalPrice: basePrice
-                }];
             }
         }
 
@@ -414,9 +429,8 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
         const finalTotal = productTotal + deliveryFee - totalDiscount;
         const payType = order.payMethodType;
 
-        const orderNum = ezoneOrderId ? `#${ezoneOrderId}` : `قيد المعالجة`;
-        const timestamp = Date.now();
-        const orderKeyId = `${timestamp}_${senderId}`;
+        const orderNum = ezoneOrderId ? String(ezoneOrderId) : `AUTO-${Date.now().toString().substring(8)}`;
+        const orderKeyId = `${Date.now()}_${senderId}`;
         const redisOrderKey = `final_order:${orderKeyId}`;
 
         const finalHost = host || "da-vinci.ezone.ly";
@@ -432,15 +446,20 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
 🚚 سيتصل بك موظف التأكيد ومندوب التوصيل قريباً لتنسيق موعد ومكان الاستلام. شكراً لثقتك بنا! 🌸`;
 
         // 5. Save the final order in Redis with structured details
+        const mainImg = (order.items && order.items[0]) ? order.items[0].img : (order.productImg || "");
+        const mainName = (order.items && order.items.length > 0) 
+            ? [...new Set(order.items.map(item => item.productName))].join(" + ")
+            : (order.productName || "غير محدد");
+
         await redis.set(redisOrderKey, JSON.stringify({
             name: order.name,
             phone: order.phone,
             location: order.location,
             landmark: order.landmark,
             notes: order.notes,
-            details: `المنتج: ${order.productName} (${variantText}) | الكمية الإجمالية: ${totalQty} | السعر الإجمالي: ${finalTotal} د.ل`,
+            details: `المنتجات:\n${itemsDetailsText}\n| الكمية الإجمالية: ${totalQty} | السعر الإجمالي: ${finalTotal} د.ل`,
             price: finalTotal,
-            img: order.productImg,
+            img: mainImg,
             status: order.status,
             date: order.date,
             ezoneOrderId: ezoneOrderId,
@@ -451,18 +470,39 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
             productTotal: productTotal,
             totalDiscount: totalDiscount,
             deliveryFee: deliveryFee,
-            sku: lastProd.sku || "",
+            sku: (order.items && order.items[0]) ? order.items[0].sku : (lastProd.sku || ""),
             items: structuredItems
         }));
 
-        // 6. Update Firebase Stock
-        if (lastProd.cat && lastProd.key) {
+        // 6. Update Firebase Stock for all items
+        if (order.items && order.items.length > 0) {
             try {
                 const token = await getFirebaseAuthToken();
-                const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`);
-                const currentStock = parseInt(stockRes.data) || 0;
-                if (currentStock >= totalQty) {
-                    await axios.put(`${FB_DB_URL}/store_master_v5/products/${lastProd.cat}/${lastProd.key}/stock.json?auth=${token}`, currentStock - totalQty);
+                const productQtys = {};
+                order.items.forEach(item => {
+                    productQtys[item.productId] = (productQtys[item.productId] || 0) + item.quantity;
+                });
+                
+                for (const pid of Object.keys(productQtys)) {
+                    // Search categories to find category name
+                    const fbProdRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`);
+                    const categories = fbProdRes.data || {};
+                    let catName = null;
+                    for (let c in categories) {
+                        if (categories[c][pid]) {
+                            catName = c;
+                            break;
+                        }
+                    }
+                    
+                    if (catName) {
+                        const stockRes = await axios.get(`${FB_DB_URL}/store_master_v5/products/${catName}/${pid}/stock.json?auth=${token}`);
+                        const currentStock = parseInt(stockRes.data) || 0;
+                        const qtyToDeduct = productQtys[pid];
+                        if (currentStock >= qtyToDeduct) {
+                            await axios.put(`${FB_DB_URL}/store_master_v5/products/${catName}/${pid}/stock.json?auth=${token}`, currentStock - qtyToDeduct);
+                        }
+                    }
                 }
             } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
         }
@@ -562,11 +602,15 @@ async function handleMessage(event, host) {
             if (matchedProduct) {
                 let stockStatus = "نفد ❌";
                 let totalStock = 0;
+                let livePrice = matchedProduct.price;
                 try {
                     const ezoneToken = await ezoneClient.getScopedToken(redis);
                     const variants = await ezoneClient.getVariants(ezoneToken, matchedProduct.key);
                     totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                     stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                    if (variants[0] && typeof variants[0].price !== 'undefined') {
+                        livePrice = variants[0].price;
+                    }
                 } catch (ezoneErr) {
                     stockStatus = parseInt(matchedProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                     totalStock = parseInt(matchedProduct.stock) || 0;
@@ -579,7 +623,7 @@ async function handleMessage(event, host) {
 
                 await redis.set(`last_product:${senderId}`, JSON.stringify({
                     ...matchedProduct,
-                    price: `${matchedProduct.price} د.ل`,
+                    price: `${livePrice} د.ل`,
                     img: matchedProduct.img || ""
                 }), 'EX', 86400);
 
@@ -588,10 +632,10 @@ async function handleMessage(event, host) {
                 
 🏷️ المنتج: ${matchedProduct.name}
 🔢 الكود: ${matchedProduct.sku}
-💰 السعر: ${matchedProduct.price} د.ل${sizesStr}
+💰 السعر: dots ${livePrice} د.ل${sizesStr}
 ✅ حالة المخزون: ${stockStatus}
 
-للبدء في الحجز، أرسل كلمة "حجز" أو اضغط على الزر أدناه 👇`;
+للبدء في الحجز، أرسل كلمة "حجز" أو اضغط على الزر أدناه 👇`.replace('\dots ', '');
 
                 await sendMessage(senderId, msg, [
                     { title: "حجز المنتج", payload: "START_BOOKING" }
@@ -627,7 +671,12 @@ async function handleMessage(event, host) {
                 await sendMessage(senderId, "تمام، أرسل رقم هاتفك:");
                 break;
             case "ASKING_PHONE":
-                order.phone = messageText;
+                // Convert Arabic numerals to Western and remove spaces/non-digits
+                const rawPhone = messageText.trim();
+                const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+                let cleanedPhone = rawPhone.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
+                cleanedPhone = cleanedPhone.replace(/\D/g, ''); 
+                order.phone = cleanedPhone;
                 await redis.set(orderKey, JSON.stringify(order));
                 await redis.set(stateKey, "ASKING_LOCATION");
                 await sendMessage(senderId, "العنوان بالتفصيل:");
@@ -736,10 +785,28 @@ async function handleMessage(event, host) {
 
                 if (!order.items) order.items = [];
                 order.items = order.items.filter(item => String(item.variantId) !== currentVarId);
+                
+                // Fetch dynamic price of variant to store in order items
+                let itemPrice = parseFloat(lastProd.price) || 0;
+                try {
+                    const ezoneToken = await ezoneClient.getScopedToken(redis);
+                    const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
+                    const cv = variants.find(v => String(v.variantId) === currentVarId);
+                    if (cv && typeof cv.price !== 'undefined') {
+                        itemPrice = cv.price;
+                    }
+                } catch (pe) {}
+
                 order.items.push({
+                    productId: lastProd.key,
+                    productName: lastProd.name,
+                    sku: lastProd.sku,
+                    img: lastProd.img || "",
                     variantId: currentVarId,
                     sizeText: order.current_size_text,
-                    quantity: selectedQty
+                    quantity: selectedQty,
+                    price: itemPrice,
+                    originalPrice: itemPrice
                 });
 
                 delete order.current_variant_id;
@@ -772,18 +839,123 @@ async function handleMessage(event, host) {
                     const sent = await sendSizeSelection(senderId, redis, lastProd, stateKey, false, excludedIds);
                     if (!sent) {
                         await sendMessage(senderId, "لا توجد مقاسات إضافية متوفرة حالياً.");
-                        await redis.set(stateKey, "ASKING_NOTES");
-                        await sendMessage(senderId, "أي ملاحظات إضافية على الطلب؟ (أو اكتب 'لا يوجد'):");
+                        await redis.set(stateKey, "ASKING_ADD_PRODUCT");
+                        const addProductReplies = [
+                            { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
+                            { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                        ];
+                        await sendMessage(senderId, "هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
                     }
                 } else if (addMore === "NO") {
-                    await redis.set(stateKey, "ASKING_NOTES");
-                    await sendMessage(senderId, "أي ملاحظات إضافية على الطلب؟ (أو اكتب 'لا يوجد'):");
+                    await redis.set(stateKey, "ASKING_ADD_PRODUCT");
+                    const addProductReplies = [
+                        { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
+                        { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                    ];
+                    await sendMessage(senderId, "هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
                 } else {
                     const addMoreReplies = [
                         { title: "نعم، إضافة مقاس", payload: "ADD_MORE:YES" },
                         { title: "لا، أكمل الطلب", payload: "ADD_MORE:NO" }
                     ];
                     await sendMessage(senderId, "الرجاء اختيار أحد الخيارات: هل ترغب في إضافة مقاس آخر؟ 👇", addMoreReplies);
+                }
+                break;
+
+            case "ASKING_ADD_PRODUCT":
+                let addProduct = null;
+                if (quickReplyPayload && quickReplyPayload.startsWith("ADD_PRODUCT:")) {
+                    addProduct = quickReplyPayload.split(":")[1];
+                } else {
+                    const norm = ezoneClient.normalizeArabic(messageText);
+                    if (norm.includes("نعم") || norm.includes("اضافه") || norm.includes("اضافة") || norm.includes("منتج")) {
+                        addProduct = "YES";
+                    } else if (norm.includes("لا") || norm.includes("اكمل") || norm.includes("كاف") || norm.includes("يكفي")) {
+                        addProduct = "NO";
+                    }
+                }
+
+                if (addProduct === "YES") {
+                    await redis.set(stateKey, "AWAITING_ADDITIONAL_PRODUCT_CODE");
+                    await sendMessage(senderId, "يرجى إرسال كود المنتج الآخر الذي ترغب في إضافته للطلب (مثال: كود 51) 👇");
+                } else if (addProduct === "NO") {
+                    await redis.set(stateKey, "ASKING_NOTES");
+                    await sendMessage(senderId, "أي ملاحظات إضافية على الطلب؟ (أو اكتب 'لا يوجد'):");
+                } else {
+                    const addProductReplies = [
+                        { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
+                        { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                    ];
+                    await sendMessage(senderId, "الرجاء اختيار أحد الخيارات: هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
+                }
+                break;
+
+            case "AWAITING_ADDITIONAL_PRODUCT_CODE":
+                const normText = ezoneClient.normalizeArabic(messageText).trim();
+                if (normText === "تخطي" || normText === "لا" || normText === "اكمل الحجز" || normText === "لا يوجد") {
+                    await redis.set(stateKey, "ASKING_NOTES");
+                    await sendMessage(senderId, "أي ملاحظات إضافية على الطلب؟ (أو اكتب 'لا يوجد'):");
+                    return;
+                }
+
+                let nextProduct = null;
+                try {
+                    const token = await getFirebaseAuthToken();
+                    const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
+                    const categories = fbRes.data || {};
+                    
+                    nextProduct = findProductByFBPostLink(categories, messageText);
+                    if (!nextProduct) {
+                        const cleanMsg = messageText.trim().toLowerCase();
+                        let isPossibleSku = false;
+                        if (/^\d+$/.test(cleanMsg)) {
+                            isPossibleSku = true;
+                        } else if (cleanMsg.includes("كود") || cleanMsg.includes("code")) {
+                            isPossibleSku = true;
+                        }
+                        
+                        if (isPossibleSku) {
+                            nextProduct = findProduct(categories, messageText, "");
+                        }
+                    }
+                } catch (e) {
+                    console.error("Additional product search error:", e.message);
+                }
+
+                if (nextProduct) {
+                    let stockStatus = "نفد ❌";
+                    let totalStock = 0;
+                    let livePrice = nextProduct.price;
+                    try {
+                        const ezoneToken = await ezoneClient.getScopedToken(redis);
+                        const variants = await ezoneClient.getVariants(ezoneToken, nextProduct.key);
+                        totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                        stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                        if (variants[0] && typeof variants[0].price !== 'undefined') {
+                            livePrice = variants[0].price;
+                        }
+                    } catch (ezoneErr) {
+                        stockStatus = parseInt(nextProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+                        totalStock = parseInt(nextProduct.stock) || 0;
+                    }
+
+                    if (totalStock <= 0) {
+                        await sendMessage(senderId, `❌ عذراً، منتج "${nextProduct.name}" (كود: ${nextProduct.sku}) نفدت كميته من المخزون حالياً. يرجى إرسال كود منتج آخر متوفر:`);
+                        return;
+                    }
+
+                    await redis.set(`last_product:${senderId}`, JSON.stringify({
+                        ...nextProduct,
+                        price: `${livePrice} د.ل`,
+                        img: nextProduct.img || ""
+                    }), 'EX', 86400);
+
+                    const sizesStr = nextProduct.sizes ? `\n📏 المقاسات: ${nextProduct.sizes}` : "";
+                    await sendMessage(senderId, `🌸 تم تحديد المنتج الإضافي:\n🏷️ المنتج: ${nextProduct.name}\n🔢 الكود: dots ${nextProduct.sku}\n💰 السعر: ${livePrice} د.ل${sizesStr}\n✅ حالة المخزون: ${stockStatus}`.replace('\dots ', ''));
+                    
+                    await sendSizeSelection(senderId, redis, nextProduct, stateKey, true);
+                } else {
+                    await sendMessage(senderId, "⚠️ عذراً، لم نتمكن من تحديد هذا المنتج. يرجى إرسال كود منتج صحيح (مثال: كود 51) أو كتابة 'تخطي' للمتابعة:");
                 }
                 break;
 
@@ -911,7 +1083,7 @@ async function handleMessage(event, host) {
                     return;
                 }
                 order.cardAmount = cardAmount;
-                order.paidAdvance = 0; // Mixed payment is at delivery
+                order.paidAdvance = 0; 
                 await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 break;
             case "AWAITING_PRODUCT_INFO":
@@ -938,11 +1110,15 @@ async function handleMessage(event, host) {
                 if (matchedProdAwaiting) {
                     let stockStatus = "نفد ❌";
                     let totalStock = 0;
+                    let livePrice = matchedProdAwaiting.price;
                     try {
                         const ezoneToken = await ezoneClient.getScopedToken(redis);
                         const variants = await ezoneClient.getVariants(ezoneToken, matchedProdAwaiting.key);
                         totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                         stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                        if (variants[0] && typeof variants[0].price !== 'undefined') {
+                            livePrice = variants[0].price;
+                        }
                     } catch (ezoneErr) {
                         stockStatus = parseInt(matchedProdAwaiting.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                         totalStock = parseInt(matchedProdAwaiting.stock) || 0;
@@ -956,19 +1132,17 @@ async function handleMessage(event, host) {
 
                     await redis.set(`last_product:${senderId}`, JSON.stringify({
                         ...matchedProdAwaiting,
-                        price: `${matchedProdAwaiting.price} د.ل`,
+                        price: `${livePrice} د.ل`,
                         img: matchedProdAwaiting.img || ""
                     }), 'EX', 86400);
 
-                    const sizesStr = matchedProdAwaiting.sizes ? `\n📏 المقاسات: ${matchedProdAwaiting.sizes}` : "";
+                    const sizesStr = matchedProdAwaiting.sizes ? `\n📏 المقاسات: dots ${matchedProdAwaiting.sizes}`.replace('\dots ', '') : "";
                     const msg = `🌸 تم تحديد المنتج بنجاح:
                     
 🏷️ المنتج: ${matchedProdAwaiting.name}
 🔢 الكود: ${matchedProdAwaiting.sku}
-💰 السعر: ${matchedProdAwaiting.price} د.ل${sizesStr}
-✅ حالة المخزون: ${stockStatus}
-
-هل ترغب في البدء في إجراءات الحجز الآن؟ 👇`;
+💰 السعر: ${livePrice} د.ل${sizesStr}
+✅ حالة المخزون: dots ${stockStatus}`.replace('\dots ', '');
 
                     await sendMessage(senderId, msg, [
                         { title: "نعم، ابدأ الحجز", payload: "START_BOOKING" }
