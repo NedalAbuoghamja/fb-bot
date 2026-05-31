@@ -20,6 +20,17 @@ const WELCOME_MESSAGE = `أهلاً بك في DaVinci Store! 🌸
 3️⃣ للاستفسارات الأخرى أو إرسال صورة:
 👈 أرسل رسالتك وسيقوم أحد موظفينا بالرد عليك في أقرب وقت! 🌹`;
 
+const IMAGE_RECEIVED_MESSAGE = `تم استلام الصورة بنجاح! 📸
+سيتواصل معك أحد موظفي الخدمة لتأكيد المنتج وإتمام الحجز يدوياً في أقرب وقت. 🌸
+
+أهلاً بك في DaVinci Store! 🌸 نحن متجر إلكتروني متكامل للأزياء الراقية.
+علماً بأن أسعار جميع المنتجات مكتوبة وموضحة بالكامل في الصور وموقعنا.
+
+🌐 يمكنك تصفح كافة الموديلات وزيارة متجرنا الإلكتروني من هنا:
+🔗 https://da-vinci.ezone.ly
+
+💳 متوفر لدينا جميع طرق الدفع المريحة (كاش عند الاستلام، بطاقات مصرفية، حوالات بنكية، أو الدفع المختلط والدفع المقدم).`;
+
 const API_KEY = "AIzaSyAcP3Ud60BC-RKD7bYVBx8bcro--L4mkLQ";
 const EMAIL = "nedal@davinci.com";
 const PASSWORD = "111111";
@@ -682,7 +693,7 @@ async function handleMessage(event, host) {
         if (!state) {
             // Check if user sent an image attachment
             if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
-                await sendMessage(senderId, "تم استلام الصورة بنجاح! 📸\nسيتواصل معك أحد موظفي الخدمة لتأكيد المنتج وإتمام الحجز يدوياً في أقرب وقت. 🌸");
+                await sendMessage(senderId, IMAGE_RECEIVED_MESSAGE);
                 return;
             }
 
@@ -1198,7 +1209,7 @@ async function handleMessage(event, host) {
                 break;
             case "AWAITING_PRODUCT_INFO":
                 if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
-                    await sendMessage(senderId, "تم استلام الصورة بنجاح! 📸\nسيتواصل معك أحد موظفي الخدمة لتأكيد المنتج وإتمام الحجز يدوياً في أقرب وقت. 🌸");
+                    await sendMessage(senderId, IMAGE_RECEIVED_MESSAGE);
                     await redis.del(stateKey);
                     return;
                 }
