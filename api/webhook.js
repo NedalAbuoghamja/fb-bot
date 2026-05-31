@@ -196,6 +196,43 @@ function findProductByFBPostLink(categories, text) {
     return null;
 }
 
+function extractSkus(text) {
+    if (!text) return [];
+    const convertArabicNumerals = (t) => {
+        const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+        return t.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
+    };
+    let cleanText = convertArabicNumerals(text).toLowerCase();
+    // Separate letters and digits
+    cleanText = cleanText
+        .replace(/([\u0600-\u06FFa-zA-Z])(\d)/g, '$1 $2')
+        .replace(/(\d)([\u0600-\u06FFa-zA-Z])/g, '$1 $2');
+    
+    // Match 1-4 digit numbers
+    const matches = cleanText.match(/\b\d{1,4}\b/g);
+    if (!matches) return [];
+    return [...new Set(matches)];
+}
+
+function findProductsBySkus(categories, skus) {
+    const matched = [];
+    for (const sku of skus) {
+        let skuFound = false;
+        for (let catName in categories) {
+            for (let prodKey in categories[catName]) {
+                const p = categories[catName][prodKey];
+                if (p.sku && String(p.sku).toLowerCase() === sku.toLowerCase()) {
+                    matched.push({ ...p, cat: catName, key: prodKey });
+                    skuFound = true;
+                    break;
+                }
+            }
+            if (skuFound) break;
+        }
+    }
+    return matched;
+}
+
 async function handleComment(event) {
     const { post_id, comment_id, from, message } = event;
     if (from.id === FB_PAGE_ID) return;
@@ -209,6 +246,60 @@ async function handleComment(event) {
         const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`, 'GET');
         const postText = postInfo ? (postInfo.message || "") : "";
         
+        // Check if user commented with multiple product SKUs
+        const skus = extractSkus(userMessage);
+        const matchedProducts = findProductsBySkus(categories, skus);
+
+        if (matchedProducts.length > 1) {
+            await likeComment(comment_id);
+            
+            const productsInfo = [];
+            for (const prod of matchedProducts) {
+                let stockStatus = "نفد ❌";
+                let livePrice = prod.price;
+                try {
+                    const ezoneToken = await ezoneClient.getScopedToken(redis);
+                    const variants = await ezoneClient.getVariants(ezoneToken, prod.key);
+                    const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                    if (variants[0] && typeof variants[0].price !== 'undefined') {
+                        livePrice = variants[0].price;
+                    }
+                } catch (err) {
+                    stockStatus = parseInt(prod.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+                }
+                productsInfo.push(`🏷️ المنتج: ${prod.name}\n🔢 الكود: ${prod.sku}\n💰 السعر: ${livePrice} د.ل\n✅ حالة المخزون: ${stockStatus}`);
+            }
+
+            const commentReplyText = `ردينا عليك فالخاص بالأسعار والتفاصيل لجميع الكودات المطلوبة! 🌹`;
+            await replyToCommentPublicly(comment_id, commentReplyText);
+
+            const privateMsg = `🌹 مرحباً بك! إليك أسعار وتفاصيل الموديلات المطلوبة:\n\n${productsInfo.join("\n\n------------------------\n\n")}\n\n📝 للحجز التلقائي، أرسل كلمة "حجز" وسجل طلبك! 🌸`;
+            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                recipient: { comment_id },
+                message: { text: privateMsg }
+            });
+
+            // Set the first product as last_product as a fallback in Redis
+            if (redis && matchedProducts[0]) {
+                const firstProd = matchedProducts[0];
+                let livePrice = firstProd.price;
+                try {
+                    const ezoneToken = await ezoneClient.getScopedToken(redis);
+                    const variants = await ezoneClient.getVariants(ezoneToken, firstProd.key);
+                    if (variants[0] && typeof variants[0].price !== 'undefined') {
+                        livePrice = variants[0].price;
+                    }
+                } catch (e) {}
+                await redis.set(`last_product:${from.id}`, JSON.stringify({
+                    ...firstProd,
+                    price: `${livePrice} د.ل`,
+                    img: firstProd.img || ""
+                }), 'EX', 86400);
+            }
+            return;
+        }
+
         const product = findProduct(categories, userMessage, postText);
 
         // Handle collection post if user didn't specify a code
@@ -564,6 +655,72 @@ async function handleMessage(event, host) {
         const orderKey = `order:${senderId}`;
 
         let state = await redis.get(stateKey);
+
+        // 0. Check if the message contains multiple product SKUs
+        if (messageText) {
+            const skus = extractSkus(messageText);
+            const exemptStates = [
+                "SELECTING_QTY",
+                "AWAITING_ADDITIONAL_PRODUCT_CODE",
+                "AWAITING_PRODUCT_INFO"
+            ];
+            
+            if (skus.length > 1 && (!state || !exemptStates.includes(state))) {
+                try {
+                    const token = await getFirebaseAuthToken();
+                    const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
+                    const categories = fbRes.data || {};
+                    const matchedProducts = findProductsBySkus(categories, skus);
+
+                    if (matchedProducts.length > 1) {
+                        const productsInfo = [];
+                        for (const prod of matchedProducts) {
+                            let stockStatus = "نفد ❌";
+                            let livePrice = prod.price;
+                            try {
+                                const ezoneToken = await ezoneClient.getScopedToken(redis);
+                                const variants = await ezoneClient.getVariants(ezoneToken, prod.key);
+                                const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                                stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                                if (variants[0] && typeof variants[0].price !== 'undefined') {
+                                    livePrice = variants[0].price;
+                                }
+                            } catch (err) {
+                                stockStatus = parseInt(prod.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+                            }
+                            productsInfo.push(`🏷️ المنتج: ${prod.name}\n🔢 الكود: ${prod.sku}\n💰 السعر: ${livePrice} د.ل\n✅ حالة المخزون: ${stockStatus}`);
+                        }
+
+                        const privateMsg = `🌸 أهلاً بك! إليك تفاصيل وأسعار الموديلات المطلوبة:\n\n${productsInfo.join("\n\n------------------------\n\n")}\n\n📝 للحجز التلقائي، أرسل كلمة "حجز" وسجل طلبك!`;
+                        await sendMessage(senderId, privateMsg);
+
+                        // Clear current order & set state to START_OR_NOT, setting the first product as last_product
+                        if (matchedProducts[0]) {
+                            const firstProd = matchedProducts[0];
+                            let livePrice = firstProd.price;
+                            try {
+                                const ezoneToken = await ezoneClient.getScopedToken(redis);
+                                const variants = await ezoneClient.getVariants(ezoneToken, firstProd.key);
+                                if (variants[0] && typeof variants[0].price !== 'undefined') {
+                                    livePrice = variants[0].price;
+                                }
+                            } catch (e) {}
+                            await redis.set(`last_product:${senderId}`, JSON.stringify({
+                                ...firstProd,
+                                price: `${livePrice} د.ل`,
+                                img: firstProd.img || ""
+                            }), 'EX', 86400);
+                        }
+
+                        await redis.del(orderKey);
+                        await redis.set(stateKey, "START_OR_NOT");
+                        return;
+                    }
+                } catch (e) {
+                    console.error("Multiple SKUs message search error:", e.message);
+                }
+            }
+        }
 
         // 1. Check for product query to override stale state
         let isProductQuery = false;
