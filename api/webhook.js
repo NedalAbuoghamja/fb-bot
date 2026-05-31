@@ -686,9 +686,41 @@ async function handleMessage(event, host) {
                 return;
             }
 
-            // If no product is matched, check if it's a greeting
+            // If no product is matched, check if it's a greeting or location query
             if (messageText) {
                 const normMsg = ezoneClient.normalizeArabic(messageText).trim();
+
+                // 1. Check for "السلام عليكم"
+                const isSalam = normMsg.includes("السلام عليكم") || normMsg.includes("سلام عليكم") || normMsg.startsWith("سلام عليكم");
+                if (isSalam) {
+                    await sendMessage(senderId, `وعليكم السلام تفضل 🌸\n\n${WELCOME_MESSAGE}`);
+                    return;
+                }
+
+                // 2. Check for location/website queries
+                const locationKeywords = [
+                    "موقعكم", "مكانكم", "موقعك", "الموقع", "وين موقع", "وين مكان", 
+                    "وين المحل", "وين محلكم", "عنوانكم", "وين العنوان", "رابط المتجر", 
+                    "رابط الموقع", "موقع المحل"
+                ];
+                const isLocationQuery = locationKeywords.some(keyword => {
+                    const normKeyword = ezoneClient.normalizeArabic(keyword).trim();
+                    return normMsg.includes(normKeyword);
+                });
+
+                if (isLocationQuery) {
+                    const locationMsg = `أهلاً بك في DaVinci Store! 🌸
+نحن متجر إلكتروني متكامل للأزياء، ونوفر خدمة التوصيل السريع لجميع المدن والمناطق الليبية 🚚.
+
+🌐 موقعنا الإلكتروني (المتجر):
+🔗 https://da-vinci.ezone.ly
+
+يمكنك تصفح كافة الموديلات المتوفرة بمقاساتها وأسعارها والطلب مباشرة عبر المتجر أو هنا بإرسال كود المنتج (مثال: كود 51) لكي نقوم بمساعدتك وإتمام الحجز فوراً! 🌹`;
+                    await sendMessage(senderId, locationMsg);
+                    return;
+                }
+
+                // 3. General Greetings
                 const greetings = ["سلام", "مرحبا", "اهلان", "اهلا", "صباح الخير", "مساء الخير", "يا هلا", "مرحبتين", "hello", "hi", "hey"];
                 const isGreeting = greetings.some(g => {
                     const normG = ezoneClient.normalizeArabic(g).trim();
