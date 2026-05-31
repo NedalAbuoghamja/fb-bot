@@ -54,6 +54,15 @@ if (process.env.REDIS_URL) {
     try {
         redis = new Redis(process.env.REDIS_URL);
         redis.on('error', (err) => console.error('Redis Error:', err.message));
+        
+        // Wrap redis.set to automatically expire user_state:* and order:* keys
+        const originalSet = redis.set.bind(redis);
+        redis.set = function(key, value, ...args) {
+            if ((key.startsWith('user_state:') || key.startsWith('order:')) && args.length === 0) {
+                return originalSet(key, value, 'EX', 86400);
+            }
+            return originalSet(key, value, ...args);
+        };
     } catch (e) {
         console.error('Redis Init Failed:', e.message);
     }
@@ -544,6 +553,96 @@ async function handleMessage(event, host) {
         const orderKey = `order:${senderId}`;
 
         let state = await redis.get(stateKey);
+
+        // 1. Check for product query to override stale state
+        let isProductQuery = false;
+        let matchedProduct = null;
+        if (messageText) {
+            const cleanMsg = messageText.trim().toLowerCase();
+            const isFbLink = messageText.includes("facebook.com") || (messageText.match(/\d{8,}/g) && !/^\d+$/.test(cleanMsg));
+            const hasCodeWord = cleanMsg.includes("كود") || cleanMsg.includes("code");
+            const isPlainNumber = /^\d+$/.test(cleanMsg);
+            
+            if (isFbLink || hasCodeWord) {
+                isProductQuery = true;
+            } else if (isPlainNumber) {
+                // Ignore plain number if the state expects quantities, amounts, or product info inputs
+                const exemptStates = [
+                    "SELECTING_QTY",
+                    "ASKING_ADVANCE_AMOUNT",
+                    "ASKING_MIXED_CARD_AMOUNT",
+                    "AWAITING_ADDITIONAL_PRODUCT_CODE",
+                    "AWAITING_PRODUCT_INFO"
+                ];
+                if (!state || !exemptStates.includes(state)) {
+                    isProductQuery = true;
+                }
+            }
+        }
+
+        if (isProductQuery) {
+            try {
+                const token = await getFirebaseAuthToken();
+                const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
+                const categories = fbRes.data || {};
+                
+                matchedProduct = findProductByFBPostLink(categories, messageText);
+                if (!matchedProduct) {
+                    matchedProduct = findProduct(categories, messageText, "");
+                }
+            } catch (e) {
+                console.error("State-override product search error:", e.message);
+            }
+
+            if (matchedProduct) {
+                let stockStatus = "نفد ❌";
+                let totalStock = 0;
+                let livePrice = matchedProduct.price;
+                try {
+                    const ezoneToken = await ezoneClient.getScopedToken(redis);
+                    const variants = await ezoneClient.getVariants(ezoneToken, matchedProduct.key);
+                    totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                    if (variants[0] && typeof variants[0].price !== 'undefined') {
+                        livePrice = variants[0].price;
+                    }
+                } catch (ezoneErr) {
+                    stockStatus = parseInt(matchedProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
+                    totalStock = parseInt(matchedProduct.stock) || 0;
+                }
+
+                if (totalStock <= 0) {
+                    await sendMessage(senderId, `❌ عذراً، منتج "${matchedProduct.name}" (كود: ${matchedProduct.sku}) نفدت كميته من المخزون حالياً.`);
+                    return;
+                }
+
+                await redis.set(`last_product:${senderId}`, JSON.stringify({
+                    ...matchedProduct,
+                    price: `${livePrice} د.ل`,
+                    img: matchedProduct.img || ""
+                }), 'EX', 86400);
+
+                // Clear current order & set state to START_OR_NOT
+                await redis.del(orderKey);
+                await redis.set(stateKey, "START_OR_NOT");
+
+                const sizesStr = matchedProduct.sizes ? `\n📏 المقاسات: ${matchedProduct.sizes}` : "";
+                const msg = `🌸 أهلاً بك! تم تحديد المنتج:
+                
+🏷️ المنتج: ${matchedProduct.name}
+🔢 الكود: ${matchedProduct.sku}
+💰 السعر: ${livePrice} د.ل${sizesStr}
+✅ حالة المخزون: ${stockStatus}
+
+للبدء في الحجز، أرسل كلمة "حجز" أو اضغط على الزر أدناه 👇`;
+
+                await sendMessage(senderId, msg, [
+                    { title: "حجز المنتج", payload: "START_BOOKING" }
+                ]);
+                return;
+            }
+        }
+
         const isStartBookingTrigger = 
             (messageText.trim().toLowerCase() === "حجز") || 
             (quickReplyPayload === "START_BOOKING") || 
@@ -576,6 +675,7 @@ async function handleMessage(event, host) {
                 }
             }
 
+            await redis.del(orderKey); // Clear any old order data!
             await sendMessage(senderId, "نبدأ الحجز! 📝 أرسل اسمك الثلاثي:");
             await redis.set(stateKey, "ASKING_NAME");
             return;
@@ -588,77 +688,6 @@ async function handleMessage(event, host) {
                 return;
             }
 
-            // Check if user sent a SKU or FB link
-            let matchedProduct = null;
-            if (messageText) {
-                try {
-                    const token = await getFirebaseAuthToken();
-                    const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
-                    const categories = fbRes.data || {};
-                    
-                    matchedProduct = findProductByFBPostLink(categories, messageText);
-                    if (!matchedProduct) {
-                        const cleanMsg = messageText.trim().toLowerCase();
-                        let isPossibleSku = false;
-                        if (/^\d+$/.test(cleanMsg)) {
-                            isPossibleSku = true;
-                        } else if (cleanMsg.includes("كود") || cleanMsg.includes("code")) {
-                            isPossibleSku = true;
-                        }
-                        
-                        if (isPossibleSku) {
-                            matchedProduct = findProduct(categories, messageText, "");
-                        }
-                    }
-                } catch (e) {
-                    console.error("No-state product search error:", e.message);
-                }
-            }
-
-            if (matchedProduct) {
-                let stockStatus = "نفد ❌";
-                let totalStock = 0;
-                let livePrice = matchedProduct.price;
-                try {
-                    const ezoneToken = await ezoneClient.getScopedToken(redis);
-                    const variants = await ezoneClient.getVariants(ezoneToken, matchedProduct.key);
-                    totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
-                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                    if (variants[0] && typeof variants[0].price !== 'undefined') {
-                        livePrice = variants[0].price;
-                    }
-                } catch (ezoneErr) {
-                    stockStatus = parseInt(matchedProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
-                    totalStock = parseInt(matchedProduct.stock) || 0;
-                }
-
-                if (totalStock <= 0) {
-                    await sendMessage(senderId, `❌ عذراً، منتج "${matchedProduct.name}" (كود: ${matchedProduct.sku}) نفدت كميته من المخزون حالياً.`);
-                    return;
-                }
-
-                await redis.set(`last_product:${senderId}`, JSON.stringify({
-                    ...matchedProduct,
-                    price: `${livePrice} د.ل`,
-                    img: matchedProduct.img || ""
-                }), 'EX', 86400);
-
-                const sizesStr = matchedProduct.sizes ? `\n📏 المقاسات: ${matchedProduct.sizes}` : "";
-                const msg = `🌸 أهلاً بك! تم تحديد المنتج:
-                
-🏷️ المنتج: ${matchedProduct.name}
-🔢 الكود: ${matchedProduct.sku}
-💰 السعر: dots ${livePrice} د.ل${sizesStr}
-✅ حالة المخزون: ${stockStatus}
-
-للبدء في الحجز، أرسل كلمة "حجز" أو اضغط على الزر أدناه 👇`.replace('\dots ', '');
-
-                await sendMessage(senderId, msg, [
-                    { title: "حجز المنتج", payload: "START_BOOKING" }
-                ]);
-                await redis.set(stateKey, "START_OR_NOT");
-                return;
-            }
             // If no product is matched, check if it's a greeting
             if (messageText) {
                 const normMsg = ezoneClient.normalizeArabic(messageText).trim();
