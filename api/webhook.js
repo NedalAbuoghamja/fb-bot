@@ -23,13 +23,10 @@ const WELCOME_MESSAGE = `أهلاً بك في DaVinci Store! 🌸
 const IMAGE_RECEIVED_MESSAGE = `تم استلام الصورة بنجاح! 📸
 سيتواصل معك أحد موظفي الخدمة لتأكيد المنتج وإتمام الحجز يدوياً في أقرب وقت. 🌸
 
-أهلاً بك في DaVinci Store! 🌸 نحن متجر إلكتروني متكامل للأزياء الراقية.
-علماً بأن أسعار جميع المنتجات مكتوبة وموضحة بالكامل في الصور وموقعنا.
+💡 البوت التلقائي لا يمكنه قراءة الصور مباشرة. إذا كان المنتج عليه كود (مثال: كود 51)، يرجى كتابة الكود هنا للحصول على السعر والمقاسات والحجز فوراً!
 
 🌐 يمكنك تصفح كافة الموديلات وزيارة متجرنا الإلكتروني من هنا:
-🔗 https://da-vinci.ezone.ly
-
-💳 متوفر لدينا جميع طرق الدفع المريحة (كاش عند الاستلام، بطاقات مصرفية، حوالات بنكية، أو الدفع المختلط والدفع المقدم).`;
+🔗 https://da-vinci.ezone.ly`;
 
 const API_KEY = "AIzaSyAcP3Ud60BC-RKD7bYVBx8bcro--L4mkLQ";
 const EMAIL = "nedal@davinci.com";
@@ -231,6 +228,209 @@ function findProductsBySkus(categories, skus) {
         }
     }
     return matched;
+}
+
+function extractAgeNumber(text) {
+    if (!text) return null;
+    const convertArabicNumerals = (t) => {
+        const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+        return t.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
+    };
+    const norm = ezoneClient.normalizeArabic(convertArabicNumerals(text));
+    
+    // Find digits first
+    const digitMatch = norm.match(/\b\d+\b/);
+    if (digitMatch) return parseInt(digitMatch[0], 10);
+
+    // If no digits, map words
+    const wordMappings = {
+        1: ["سنه", "سنة", "عام", "واحد"],
+        2: ["سنتين", "سنتان", "عامين", "اثنين", "تنين"],
+        3: ["ثلاث", "تلات", "تلاتة", "ثلاثة"],
+        4: ["اربع", "أربع", "اربعه", "أربعة"],
+        5: ["خمس", "خمسه", "خمسة"],
+        6: ["ست", "سته", "ستة"],
+        7: ["سبع", "سبعه", "سبعة"],
+        8: ["ثمان", "تمان", "ثمانيه", "تمانية"],
+        9: ["تسع", "تسعه", "تسعة"],
+        10: ["عشر", "عشره", "عشرة"]
+    };
+
+    for (const [num, words] of Object.entries(wordMappings)) {
+        for (const word of words) {
+            const regex = new RegExp(`(?:^|\\s)${word}(?:$|\\s)`, 'i');
+            if (regex.test(norm)) {
+                return parseInt(num, 10);
+            }
+        }
+    }
+    return null;
+}
+
+function isProductInquiry(text) {
+    if (!text) return false;
+    const norm = ezoneClient.normalizeArabic(text).trim();
+    
+    const priceKeywords = ["بكم", "كم", "سعر", "السعر", "قداش", "بقداش", "سعرها", "سعره"];
+    const sizeKeywords = ["مقاس", "مقاسات", "المقاس", "المقاسات", "عمر", "العمر", "اعمار", "الأعمار", "سنوات", "سنة", "سنه", "شن المقاس", "شن مقاساته", "شن مقاساتها"];
+    const availabilityKeywords = ["متوفر", "في منه", "في منها", "عندك", "موجود", "فيه"];
+    
+    const allKeywords = [...priceKeywords, ...sizeKeywords, ...availabilityKeywords];
+    
+    // Check if the text matches any of these exactly or contains them as words
+    for (const kw of allKeywords) {
+        const regex = new RegExp(`(?:^|\\s)${kw}(?:$|\\s|،|\\?|!|$)`, 'i');
+        if (regex.test(norm)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function handleProductInquiry(senderId, text, lastProd, stateKey) {
+    const norm = ezoneClient.normalizeArabic(text).trim();
+    
+    // 1. Check if we have last product
+    if (lastProd && lastProd.key) {
+        const isPriceQuery = ["بكم", "كم", "سعر", "السعر", "قداش", "بقداش", "سعرها", "سعره"].some(kw => {
+            const regex = new RegExp(`(?:^|\\s)${kw}(?:$|\\s|،|\\?|!|$)`, 'i');
+            return regex.test(norm);
+        });
+        
+        const isSizeQuery = ["مقاس", "مقاسات", "المقاس", "المقاسات", "شن المقاس", "شن مقاساته", "شن مقاساتها"].some(kw => {
+            const regex = new RegExp(`(?:^|\\s)${kw}(?:$|\\s|،|\\?|!|$)`, 'i');
+            return regex.test(norm);
+        });
+        
+        const requestedAge = extractAgeNumber(text);
+        
+        if (requestedAge !== null) {
+            // Check if size is available
+            const sizesStr = lastProd.sizes ? String(lastProd.sizes) : "";
+            const numStr = String(requestedAge);
+            
+            // Check if size string contains the digit/number
+            const isAvailable = sizesStr.includes(numStr);
+            
+            if (isAvailable) {
+                const reply = `نعم، مقاس ${requestedAge} سنوات متوفر حالياً! 🌸\nسعر هذا الموديل (كود ${lastProd.sku}) هو: ${lastProd.price} 💰`;
+                await sendMessage(senderId, reply, [
+                    { title: "حجز المنتج", payload: "START_BOOKING" }
+                ]);
+            } else {
+                const reply = `للأسف، مقاس ${requestedAge} سنوات غير متوفر حالياً لهذا الموديل ❌.\nالمقاسات المتوفرة هي: ${sizesStr || "غير محددة"} 🌸`;
+                await sendMessage(senderId, reply);
+            }
+            await redis.set(stateKey, "START_OR_NOT");
+            return true;
+        }
+        
+        if (isPriceQuery && isSizeQuery) {
+            const reply = `سعر الموديل (كود ${lastProd.sku}) هو: ${lastProd.price} 💰\nالمقاسات المتوفرة: ${lastProd.sizes || "غير حددية"} 📏`;
+            await sendMessage(senderId, reply, [
+                { title: "حجز المنتج", payload: "START_BOOKING" }
+            ]);
+            await redis.set(stateKey, "START_OR_NOT");
+            return true;
+        }
+        
+        if (isPriceQuery) {
+            const reply = `سعر الموديل (كود ${lastProd.sku}) هو: ${lastProd.price} 💰`;
+            await sendMessage(senderId, reply, [
+                { title: "حجز المنتج", payload: "START_BOOKING" }
+            ]);
+            await redis.set(stateKey, "START_OR_NOT");
+            return true;
+        }
+        
+        if (isSizeQuery) {
+            const reply = `المقاسات المتوفرة للموديل (كود ${lastProd.sku}) هي: ${lastProd.sizes || "غير حددية"} 📏`;
+            await sendMessage(senderId, reply, [
+                { title: "حجز المنتج", payload: "START_BOOKING" }
+            ]);
+            await redis.set(stateKey, "START_OR_NOT");
+            return true;
+        }
+        
+        // General availability inquiry
+        const reply = `سعر الموديل (كود ${lastProd.sku}) هو: ${lastProd.price} 💰\nالمقاسات المتوفرة: ${lastProd.sizes || "غير حددية"} 📏`;
+        await sendMessage(senderId, reply, [
+            { title: "حجز المنتج", payload: "START_BOOKING" }
+        ]);
+        await redis.set(stateKey, "START_OR_NOT");
+        return true;
+    } else {
+        // No last product
+        const reply = `أهلاً بك! يرجى إرسال كود المنتج (مثلاً: 51) أو صورة المنتج لنتمكن من إفادتك بالسعر والمقاسات المتوفرة فوراً 🌸`;
+        await sendMessage(senderId, reply);
+        await redis.set(stateKey, "AWAITING_PRODUCT_INFO");
+        return true;
+    }
+}
+
+async function handleAdminEcho(event) {
+    const customerPsid = event.recipient.id;
+    const adminMessageText = event.message.text;
+    const appId = event.message.app_id;
+    
+    // Only learn if the message was sent by a human admin (not by our bot/app)
+    if (appId) return; // If appId exists, it was sent by our bot, so ignore it
+    if (!adminMessageText) return; // Ignore non-text replies
+    if (!redis) return;
+    
+    try {
+        const lastCustomerMessage = await redis.get(`last_customer_message:${customerPsid}`);
+        if (lastCustomerMessage) {
+            console.log(`[Learning] Learning from admin reply to PSID ${customerPsid}: "${lastCustomerMessage}" -> "${adminMessageText}"`);
+            
+            const token = await getFirebaseAuthToken();
+            // Push the new learned Q&A pair to Firebase
+            await axios.post(`${FB_DB_URL}/store_master_v5/learned_replies.json?auth=${token}`, {
+                question: lastCustomerMessage.trim(),
+                answer: adminMessageText.trim(),
+                timestamp: new Date().toISOString()
+            }, { timeout: 5000 });
+            
+            // Optionally, remove the key so we don't learn multiple replies for the same question
+            await redis.del(`last_customer_message:${customerPsid}`);
+        }
+    } catch (err) {
+        console.error("[Learning] Failed to save learned reply:", err.message);
+    }
+}
+
+async function findLearnedReply(messageText) {
+    try {
+        const token = await getFirebaseAuthToken();
+        const res = await axios.get(`${FB_DB_URL}/store_master_v5/learned_replies.json?auth=${token}`, { timeout: 3000 });
+        const learned = res.data;
+        if (!learned) return null;
+        
+        const normUser = ezoneClient.normalizeArabic(messageText).trim();
+        let bestMatch = null;
+        
+        for (const key of Object.keys(learned)) {
+            const pair = learned[key];
+            if (!pair || !pair.question) continue;
+            const normQuestion = ezoneClient.normalizeArabic(pair.question).trim();
+            
+            // Exact match
+            if (normUser === normQuestion) {
+                return pair;
+            }
+            
+            // Substring matching
+            if (normUser.length > 5 && normQuestion.length > 5) {
+                if (normUser.includes(normQuestion) || normQuestion.includes(normUser)) {
+                    bestMatch = pair;
+                }
+            }
+        }
+        return bestMatch;
+    } catch (err) {
+        console.error("[Learning] Failed to match learned reply:", err.message);
+        return null;
+    }
 }
 
 async function handleComment(event) {
@@ -643,6 +843,11 @@ async function handleMessage(event, host) {
 
         let state = await redis.get(stateKey);
 
+        // Save customer's message for admin reply learning
+        if (messageText) {
+            await redis.set(`last_customer_message:${senderId}`, messageText, 'EX', 86400);
+        }
+
         // 0. Check if the message contains multiple product SKUs
         if (messageText) {
             const skus = extractSkus(messageText);
@@ -819,6 +1024,30 @@ async function handleMessage(event, host) {
             await sendMessage(senderId, "نبدأ الحجز! 📝 أرسل اسمك الثلاثي:");
             await redis.set(stateKey, "ASKING_NAME");
             return;
+        }
+
+        const safeStates = [null, "START_OR_NOT", "AWAITING_PRODUCT_INFO"];
+        if (safeStates.includes(state) && messageText && isProductInquiry(messageText)) {
+            const handled = await handleProductInquiry(senderId, messageText, lastProd, stateKey);
+            if (handled) return;
+        }
+
+        // Check for learned replies
+        if (safeStates.includes(state) && messageText) {
+            try {
+                const learned = await findLearnedReply(messageText);
+                if (learned) {
+                    await sendMessage(senderId, learned.answer);
+                    if (state === "START_OR_NOT" && lastProd && lastProd.key) {
+                        await sendMessage(senderId, `📝 للحجز، أرسل كلمة "حجز" أو اضغط على الزر أدناه 👇`, [
+                            { title: "حجز المنتج", payload: "START_BOOKING" }
+                        ]);
+                    }
+                    return;
+                }
+            } catch (le) {
+                console.error("[Learning] Match check error:", le.message);
+            }
         }
 
         if (!state) {
@@ -1473,9 +1702,13 @@ module.exports = async (req, res) => {
                     }
                     if (entry.messaging) {
                         for (const ev of entry.messaging) {
-                             if (ev.message && !ev.message.is_echo) {
-                                await handleMessage(ev, req.headers.host);
-                            } else if (ev.postback) {
+                             if (ev.message) {
+                                 if (ev.message.is_echo) {
+                                     await handleAdminEcho(ev);
+                                 } else {
+                                     await handleMessage(ev, req.headers.host);
+                                 }
+                             } else if (ev.postback) {
                                 await handlePostback(ev);
                             }
                         }
