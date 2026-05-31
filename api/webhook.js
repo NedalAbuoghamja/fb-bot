@@ -569,8 +569,6 @@ async function handleMessage(event, host) {
                 // Ignore plain number if the state expects quantities, amounts, or product info inputs
                 const exemptStates = [
                     "SELECTING_QTY",
-                    "ASKING_ADVANCE_AMOUNT",
-                    "ASKING_MIXED_CARD_AMOUNT",
                     "AWAITING_ADDITIONAL_PRODUCT_CODE",
                     "AWAITING_PRODUCT_INFO"
                 ];
@@ -1160,124 +1158,10 @@ async function handleMessage(event, host) {
                 order.productImg = lastProd.img || "";
                 order.productName = lastProd.name || "غير محدد";
                 order.productPrice = parseFloat(lastProd.price) || 0;
+                order.payMethodType = "CASH";
+                order.paidAdvance = 0;
                 await redis.set(orderKey, JSON.stringify(order));
                 
-                await redis.set(stateKey, "ASKING_PAYMENT_METHOD");
-                await sendMessage(senderId, "الرجاء اختيار طريقة دفع قيمة المنتج 👇:", [
-                    { title: "💵 كاش عند الاستلام", payload: "PAYMENT:CASH" },
-                    { title: "💳 بطاقة مصرفية", payload: "PAYMENT:CARD" },
-                    { title: "📲 حوالة مصرفية", payload: "PAYMENT:TRANSFER" },
-                    { title: "🔄 كاش + بطاقة", payload: "PAYMENT:MIXED" },
-                    { title: "💸 دفع جزء مقدماً", payload: "PAYMENT:ADVANCE" }
-                ]);
-                break;
-
-            case "ASKING_PAYMENT_METHOD":
-                let payMethod = null;
-                if (quickReplyPayload && quickReplyPayload.startsWith("PAYMENT:")) {
-                    payMethod = quickReplyPayload.split(":")[1];
-                } else {
-                    const norm = ezoneClient.normalizeArabic(messageText);
-                    if (norm.includes("كاش") && norm.includes("بطاق")) payMethod = "MIXED";
-                    else if (norm.includes("كاش")) payMethod = "CASH";
-                    else if (norm.includes("بطاق")) payMethod = "CARD";
-                    else if (norm.includes("حوال")) payMethod = "TRANSFER";
-                    else if (norm.includes("جزء") || norm.includes("عربون") || norm.includes("مقدم")) payMethod = "ADVANCE";
-                }
-
-                if (!payMethod) {
-                    await sendMessage(senderId, "⚠️ الرجاء اختيار أحد خيارات الدفع المتاحة من الأزرار 👇:", [
-                        { title: "💵 كاش عند الاستلام", payload: "PAYMENT:CASH" },
-                        { title: "💳 بطاقة مصرفية", payload: "PAYMENT:CARD" },
-                        { title: "📲 حوالة مصرفية", payload: "PAYMENT:TRANSFER" },
-                        { title: "🔄 كاش + بطاقة", payload: "PAYMENT:MIXED" },
-                        { title: "💸 دفع جزء مقدماً", payload: "PAYMENT:ADVANCE" }
-                    ]);
-                    return;
-                }
-
-                order.payMethodType = payMethod;
-                await redis.set(orderKey, JSON.stringify(order));
-
-                if (payMethod === "CASH") {
-                    order.paidAdvance = 0;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
-                } else if (payMethod === "CARD" || payMethod === "TRANSFER") {
-                    await redis.set(stateKey, "ASKING_ADVANCE_TYPE");
-                    await sendMessage(senderId, "هل قمت بدفع أي قيمة مقدماً (عربون)؟ 👇", [
-                        { title: "❌ لا، لا يوجد", payload: "ADVANCE:NONE" },
-                        { title: "½ نصف القيمة", payload: "ADVANCE:HALF" },
-                        { title: "💰 كامل القيمة", payload: "ADVANCE:FULL" },
-                        { title: "💵 قيمة أخرى", payload: "ADVANCE:OTHER" }
-                    ]);
-                } else if (payMethod === "MIXED") {
-                    await redis.set(stateKey, "ASKING_MIXED_CARD_AMOUNT");
-                    await sendMessage(senderId, "يرجى كتابة القيمة المراد دفعها بالبطاقة (مثلاً: 50):");
-                } else if (payMethod === "ADVANCE") {
-                    await redis.set(stateKey, "ASKING_ADVANCE_AMOUNT");
-                    await sendMessage(senderId, "يرجى كتابة قيمة العربون المدفوع مقدماً (مثلاً: 40):");
-                }
-                break;
-
-            case "ASKING_ADVANCE_TYPE":
-                let advType = null;
-                if (quickReplyPayload && quickReplyPayload.startsWith("ADVANCE:")) {
-                    advType = quickReplyPayload.split(":")[1];
-                } else {
-                    const norm = ezoneClient.normalizeArabic(messageText);
-                    if (norm.includes("نصف") || norm.includes("نص")) advType = "HALF";
-                    else if (norm.includes("كامل") || norm.includes("كل")) advType = "FULL";
-                    else if (norm.includes("لا") || norm.includes("ما في") || norm.includes("لا يوجد")) advType = "NONE";
-                    else if (norm.includes("اخر") || norm.includes("أخرى")) advType = "OTHER";
-                }
-
-                if (!advType) {
-                    await sendMessage(senderId, "⚠️ الرجاء الاختيار من الأزرار 👇:", [
-                        { title: "❌ لا، لا يوجد", payload: "ADVANCE:NONE" },
-                        { title: "½ نصف القيمة", payload: "ADVANCE:HALF" },
-                        { title: "💰 كامل القيمة", payload: "ADVANCE:FULL" },
-                        { title: "💵 قيمة أخرى", payload: "ADVANCE:OTHER" }
-                    ]);
-                    return;
-                }
-
-                const prodPrice = parseFloat(lastProd.price) || 0;
-                const itemsCount = (order.items || []).reduce((sum, item) => sum + item.quantity, 0) || 1;
-                const prodTotal = prodPrice * itemsCount;
-
-                if (advType === "NONE") {
-                    order.paidAdvance = 0;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
-                } else if (advType === "HALF") {
-                    order.paidAdvance = prodTotal / 2;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
-                } else if (advType === "FULL") {
-                    order.paidAdvance = prodTotal;
-                    await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
-                } else if (advType === "OTHER") {
-                    await redis.set(stateKey, "ASKING_ADVANCE_AMOUNT");
-                    await sendMessage(senderId, "يرجى كتابة قيمة العربون المدفوع مقدماً (مثلاً: 30):");
-                }
-                break;
-
-            case "ASKING_ADVANCE_AMOUNT":
-                const advAmount = parseFloat(messageText);
-                if (isNaN(advAmount) || advAmount < 0) {
-                    await sendMessage(senderId, "⚠️ الرجاء إدخال رقم صحيح لقيمة العربون (مثلاً: 45):");
-                    return;
-                }
-                order.paidAdvance = advAmount;
-                await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
-                break;
-
-            case "ASKING_MIXED_CARD_AMOUNT":
-                const cardAmount = parseFloat(messageText);
-                if (isNaN(cardAmount) || cardAmount < 0) {
-                    await sendMessage(senderId, "⚠️ الرجاء إدخال رقم صحيح للقيمة المدفوعة بالبطاقة (مثلاً: 50):");
-                    return;
-                }
-                order.cardAmount = cardAmount;
-                order.paidAdvance = 0; 
                 await finishOrderCreation(senderId, redis, order, lastProd, stateKey, orderKey, host);
                 break;
             case "AWAITING_PRODUCT_INFO":
