@@ -349,7 +349,8 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
                     quantity: item.quantity
                 }));
 
-                ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, ezoneItems);
+                const orderNotes = `نقطة دالة: ${order.landmark || 'غير محددة'} | ملاحظات: ${order.notes || 'لا يوجد'}`;
+                ezoneOrderId = await ezoneClient.placeOrder(ezoneToken, ezoneCustomerId, ezoneAddressId, ezoneItems, null, 1, orderNotes);
             } catch (ezoneErr) {
                 console.error("[Webhook] Ezone order integration failed:", ezoneErr.message);
             }
@@ -507,11 +508,21 @@ async function finishOrderCreation(senderId, redis, order, lastProd, stateKey, o
             } catch (stkErr) { console.error("Stock Update Error:", stkErr.message); }
         }
 
-        // 7. Cleanup Redis states
-        await redis.del(stateKey, orderKey, `last_product:${senderId}`);
+        // 7. Cleanup Redis states (except stateKey which we update to post-booking state)
+        await redis.del(orderKey, `last_product:${senderId}`);
 
         // 8. Send Invoice
         await sendMessage(senderId, invoiceMsg);
+
+        // 9. Send Post-Booking Menu
+        const nextStepsMsg = `هل ترغب في القيام بأي شيء آخر؟ 👇`;
+        const nextStepsReplies = [
+            { title: "🛍️ حجز منتج آخر", payload: "NEXT_ACTION:NEW_BOOKING" },
+            { title: "👤 التحدث مع موظف", payload: "NEXT_ACTION:TALK_AGENT" },
+            { title: "🌐 زيارة المتجر", payload: "NEXT_ACTION:VISIT_STORE" }
+        ];
+        await sendMessage(senderId, nextStepsMsg, nextStepsReplies);
+        await redis.set(stateKey, "AWAITING_POST_BOOKING_ACTION");
 
     } catch (criticalErr) {
         console.error("[Webhook] critical error in finishOrderCreation:", criticalErr.message);
@@ -670,29 +681,178 @@ async function handleMessage(event, host) {
                 await redis.set(stateKey, "ASKING_PHONE");
                 await sendMessage(senderId, "تمام، أرسل رقم هاتفك:");
                 break;
-            case "ASKING_PHONE":
-                // Convert Arabic numerals to Western and remove spaces/non-digits
+            case "ASKING_PHONE": {
                 const rawPhone = messageText.trim();
                 const easternNums = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
                 let cleanedPhone = rawPhone.replace(/[٠-٩]/g, d => easternNums.indexOf(d));
                 cleanedPhone = cleanedPhone.replace(/\D/g, ''); 
                 order.phone = cleanedPhone;
                 await redis.set(orderKey, JSON.stringify(order));
-                await redis.set(stateKey, "ASKING_LOCATION");
-                await sendMessage(senderId, "العنوان بالتفصيل:");
+                
+                await redis.set(stateKey, "SELECTING_CITY");
+                const cityQuickReplies = [
+                    { title: "طرابلس", payload: "SELECT_CITY:1:طرابلس" },
+                    { title: "بنغازي", payload: "SELECT_CITY:2:بنغازي" },
+                    { title: "مصراتة", payload: "SELECT_CITY:4:مصراتة" },
+                    { title: "الزاوية", payload: "SELECT_CITY:5:الزاوية" },
+                    { title: "جنزور", payload: "SELECT_CITY:6:جنزور" },
+                    { title: "تاجوراء", payload: "SELECT_CITY:14:تاجوراء" },
+                    { title: "الخمس", payload: "SELECT_CITY:17:الخمس" },
+                    { title: "زليتن", payload: "SELECT_CITY:18:زليتن" },
+                    { title: "ترهونة", payload: "SELECT_CITY:21:ترهونة" },
+                    { title: "غريان", payload: "SELECT_CITY:30:غريان" },
+                    { title: "قصر بن غشير", payload: "SELECT_CITY:39:قصر بن غشير" },
+                    { title: "سبها", payload: "SELECT_CITY:3:سبها" },
+                    { title: "مدينة أخرى 🌍", payload: "SELECT_CITY:OTHER:مدينة أخرى" }
+                ];
+                await sendMessage(senderId, "يرجى اختيار مدينة التوصيل من القائمة 👇:", cityQuickReplies);
                 break;
-            case "ASKING_LOCATION":
-                order.location = messageText;
+            }
+            case "SELECTING_CITY": {
+                let cityId = null;
+                let cityName = "";
+                if (quickReplyPayload && quickReplyPayload.startsWith("SELECT_CITY:")) {
+                    const parts = quickReplyPayload.split(":");
+                    cityId = parts[1];
+                    cityName = parts[2];
+                } else {
+                    cityName = messageText.trim();
+                    const citiesMap = {
+                        "طرابلس": "1", "بنغازي": "2", "مصراتة": "4", "مصراته": "4",
+                        "الزاوية": "5", "الزاويه": "5", "جنزور": "6", "تاجوراء": "14",
+                        "الخمس": "17", "زليتن": "18", "ترهونة": "21", "ترهونه": "21",
+                        "غريان": "30", "قصر بن غشير": "39", "قصربن غشير": "39", "سبها": "3"
+                    };
+                    const normCityName = ezoneClient.normalizeArabic(cityName);
+                    for (const [nameKey, idVal] of Object.entries(citiesMap)) {
+                        if (ezoneClient.normalizeArabic(nameKey) === normCityName) {
+                            cityId = idVal;
+                            cityName = nameKey;
+                            break;
+                        }
+                    }
+                }
+
+                if (cityId === "OTHER") {
+                    await redis.set(stateKey, "WRITING_CITY");
+                    await sendMessage(senderId, "يرجى كتابة اسم مدينتك للتوصيل 🌍:");
+                    return;
+                }
+
+                if (!cityId) {
+                    order.city_name = cityName;
+                    await redis.set(orderKey, JSON.stringify(order));
+                    await redis.set(stateKey, "ASKING_DETAILED_ADDRESS");
+                    await sendMessage(senderId, "يرجى كتابة العنوان بالتفصيل (مثل الحي أو الشارع) 👇:");
+                    return;
+                }
+
+                order.city_id = cityId;
+                order.city_name = cityName;
                 await redis.set(orderKey, JSON.stringify(order));
-                await redis.set(stateKey, "ASKING_LANDMARK");
-                await sendMessage(senderId, "أقرب نقطة دالة:");
+
+                if (cityId === "1") {
+                    await redis.set(stateKey, "SELECTING_REGION");
+                    const tripoliRegions = [
+                        { title: "السياحية", payload: "SELECT_REGION:101:السياحية" },
+                        { title: "السراج", payload: "SELECT_REGION:115:السراج" },
+                        { title: "غوط الشعال", payload: "SELECT_REGION:114:غوط الشعال" },
+                        { title: "حي الأندلس", payload: "SELECT_REGION:102:حي الأندلس" },
+                        { title: "قرقارش", payload: "SELECT_REGION:113:قرقارش" },
+                        { title: "عين زارة", payload: "SELECT_REGION:150:عين زارة" },
+                        { title: "سوق الجمعة", payload: "SELECT_REGION:138:سوق الجمعة" },
+                        { title: "صلاح الدين", payload: "SELECT_REGION:126:صلاح الدين" },
+                        { title: "أبوسليم", payload: "SELECT_REGION:119:أبوسليم" },
+                        { title: "الفرناج", payload: "SELECT_REGION:129:الفرناج" },
+                        { title: "الظهرة", payload: "SELECT_REGION:104:الظهرة" },
+                        { title: "منطقة أخرى 📍", payload: "SELECT_REGION:WRITE_OTHER:منطقة أخرى" }
+                    ];
+                    await sendMessage(senderId, "الرجاء اختيار منطقة التوصيل في طرابلس 👇:", tripoliRegions);
+                } else if (cityId === "2") {
+                    await redis.set(stateKey, "SELECTING_REGION");
+                    const benghaziRegions = [
+                        { title: "وسط المدينة", payload: "SELECT_REGION:155:وسط المدينة" },
+                        { title: "الليثي", payload: "SELECT_REGION:175:الليثي" },
+                        { title: "السلماني", payload: "SELECT_REGION:167:السلماني" },
+                        { title: "بلعون", payload: "SELECT_REGION:173:بلعون" },
+                        { title: "الحدائق", payload: "SELECT_REGION:165:الحدائق" },
+                        { title: "الماجوري", payload: "SELECT_REGION:162:الماجوري" },
+                        { title: "الفويهات", payload: "SELECT_REGION:176:الفويهات" },
+                        { title: "طابلينو", payload: "SELECT_REGION:171:طابلينو" },
+                        { title: "بنينا", payload: "SELECT_REGION:182:بنينا" },
+                        { title: "الهواري", payload: "SELECT_REGION:185:الهواري" },
+                        { title: "الكيش", payload: "SELECT_REGION:188:الكيش" },
+                        { title: "منطقة أخرى 📍", payload: "SELECT_REGION:WRITE_OTHER:منطقة أخرى" }
+                    ];
+                    await sendMessage(senderId, "الرجاء اختيار منطقة التوصيل في بنغازي 👇:", benghaziRegions);
+                } else {
+                    order.location = cityName;
+                    await redis.set(orderKey, JSON.stringify(order));
+                    await redis.set(stateKey, "ASKING_DETAILED_ADDRESS");
+                    await sendMessage(senderId, "يرجى كتابة العنوان بالتفصيل (مثل الحي أو الشارع) 👇:");
+                }
                 break;
-            case "ASKING_LANDMARK":
-                order.landmark = messageText;
+            }
+            case "WRITING_CITY": {
+                order.city_name = messageText.trim();
+                await redis.set(orderKey, JSON.stringify(order));
+                await redis.set(stateKey, "ASKING_DETAILED_ADDRESS");
+                await sendMessage(senderId, "يرجى كتابة العنوان بالتفصيل (مثل الحي أو الشارع) 👇:");
+                break;
+            }
+            case "SELECTING_REGION": {
+                let regionId = null;
+                let regionName = "";
+                if (quickReplyPayload && quickReplyPayload.startsWith("SELECT_REGION:")) {
+                    const parts = quickReplyPayload.split(":");
+                    regionId = parts[1];
+                    regionName = parts[2];
+                } else {
+                    regionName = messageText.trim();
+                }
+
+                if (regionId === "WRITE_OTHER" || !regionId) {
+                    await redis.set(stateKey, "WRITING_REGION");
+                    await sendMessage(senderId, "يرجى كتابة اسم منطقتك للتوصيل 👇:");
+                    return;
+                }
+
+                order.sub_city_id = regionId;
+                order.region_name = regionName;
+                order.location = `${order.city_name} - ${regionName}`;
+                await redis.set(orderKey, JSON.stringify(order));
+                
+                await redis.set(stateKey, "ASKING_LANDMARK");
+                await sendMessage(senderId, "أقرب نقطة دالة لتسهيل التوصيل (مثلاً: بجانب جامع أو محطة وقود) 👇:");
+                break;
+            }
+            case "WRITING_REGION": {
+                const regName = messageText.trim();
+                order.region_name = regName;
+                order.location = `${order.city_name} - ${regName}`;
+                await redis.set(orderKey, JSON.stringify(order));
+                
+                await redis.set(stateKey, "ASKING_LANDMARK");
+                await sendMessage(senderId, "أقرب نقطة دالة لتسهيل التوصيل (مثلاً: بجانب جامع أو محطة وقود) 👇:");
+                break;
+            }
+            case "ASKING_DETAILED_ADDRESS": {
+                const detailedAddr = messageText.trim();
+                order.detailed_address = detailedAddr;
+                order.location = `${order.city_name || ""} - ${detailedAddr}`;
+                await redis.set(orderKey, JSON.stringify(order));
+                
+                await redis.set(stateKey, "ASKING_LANDMARK");
+                await sendMessage(senderId, "أقرب نقطة دالة لتسهيل التوصيل (مثلاً: بجانب جامع أو محطة وقود) 👇:");
+                break;
+            }
+            case "ASKING_LANDMARK": {
+                order.landmark = messageText.trim();
                 order.items = []; // Initialize items array for the order
                 await redis.set(orderKey, JSON.stringify(order));
                 await sendSizeSelection(senderId, redis, lastProd, stateKey, true);
                 break;
+            }
             case "SELECTING_SIZE":
                 let variantId = null;
                 let sizeText = "";
@@ -1172,6 +1332,37 @@ async function handleMessage(event, host) {
                     await redis.del(stateKey);
                 }
                 break;
+
+            case "AWAITING_POST_BOOKING_ACTION": {
+                let nextAction = null;
+                if (quickReplyPayload && quickReplyPayload.startsWith("NEXT_ACTION:")) {
+                    nextAction = quickReplyPayload.split(":")[1];
+                } else {
+                    const norm = ezoneClient.normalizeArabic(messageText);
+                    if (norm.includes("حجز") || norm.includes("منتج اخر") || norm.includes("منتج آخر") || norm.includes("اضافه") || norm.includes("اضافة")) {
+                        nextAction = "NEW_BOOKING";
+                    } else if (norm.includes("موظف") || norm.includes("دعم") || norm.includes("تحدث") || norm.includes("استفسار") || norm.includes("كلم")) {
+                        nextAction = "TALK_AGENT";
+                    } else if (norm.includes("متجر") || norm.includes("موقع") || norm.includes("رابط")) {
+                        nextAction = "VISIT_STORE";
+                    }
+                }
+
+                if (nextAction === "NEW_BOOKING") {
+                    await redis.set(stateKey, "AWAITING_PRODUCT_INFO");
+                    await sendMessage(senderId, "حاضر! 🌸 يرجى إرسال كود المنتج الجديد الذي ترغب في حجزه (مثال: كود 51) أو رابط المنشور:");
+                } else if (nextAction === "TALK_AGENT") {
+                    await redis.del(stateKey);
+                    await sendMessage(senderId, "تفضل، سيقوم أحد موظفي الخدمة بالتواصل معك والرد على استفسارك هنا في أقرب وقت. يمكنك كتابة استفسارك مباشرة 👇");
+                } else if (nextAction === "VISIT_STORE") {
+                    await redis.del(stateKey);
+                    await sendMessage(senderId, "تفضل بزيارة متجرنا الإلكتروني لمشاهدة كافة المنتجات الحالية: https://da-vinci.ezone.ly 🌸");
+                } else {
+                    await redis.del(stateKey);
+                    return await handleMessage(event, host);
+                }
+                break;
+            }
         }
     } catch (e) { console.error("Message Error:", e.message); }
 }

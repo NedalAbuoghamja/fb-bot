@@ -131,7 +131,7 @@ async function getScopedToken(redis) {
 async function findOrCreateCustomer(token, name, phone, email) {
     try {
         console.log(`[Ezone] Searching for customer by phone: ${phone}...`);
-        const searchRes = await fetch(`https://mapi.ezone.ly/customers/search?query=${phone}`, {
+        const searchRes = await fetch(`https://mapi.ezone.ly/customers/search?SearchKey=${phone}`, {
             headers: { "Authorization": `Bearer ${token}` }
         });
         
@@ -261,6 +261,7 @@ async function resolveCityAndSubCity(token, location, landmark) {
     try {
         const combinedText = `${location || ""} ${landmark || ""}`;
         const normText = normalizeArabic(combinedText);
+        const cleanText = normText.replace(/\s+/g, "");
 
         // 1. Fetch cities
         console.log("[Ezone] Resolving city ID from Ezone settings...");
@@ -271,11 +272,12 @@ async function resolveCityAndSubCity(token, location, landmark) {
         if (citiesRes.status === 200) {
             const citiesJson = await citiesRes.json();
             const cities = citiesJson.data || [];
+            const sortedCities = [...cities].sort((a, b) => b.text.length - a.text.length);
             
-            for (const city of cities) {
+            for (const city of sortedCities) {
                 const normCity = normalizeArabic(city.text);
-                const regex = new RegExp(`(?:^|\\s)${escapeRegExp(normCity)}(?:$|\\s)`, "i");
-                if (regex.test(normText)) {
+                const cleanCity = normCity.replace(/\s+/g, "");
+                if (cleanCity && cleanText.includes(cleanCity)) {
                     cityId = city.id;
                     console.log(`[Ezone] Matched City: ${city.text} (ID: ${cityId})`);
                     break;
@@ -292,13 +294,12 @@ async function resolveCityAndSubCity(token, location, landmark) {
         if (subRes.status === 200) {
             const subJson = await subRes.json();
             const subcities = subJson.data || [];
-            
             const sortedSubs = [...subcities].sort((a, b) => b.text.length - a.text.length);
 
             for (const sub of sortedSubs) {
                 const normSub = normalizeArabic(sub.text);
-                const regex = new RegExp(`(?:^|\\s)${escapeRegExp(normSub)}(?:$|\\s)`, "i");
-                if (regex.test(normText)) {
+                const cleanSub = normSub.replace(/\s+/g, "");
+                if (cleanSub && cleanText.includes(cleanSub)) {
                     subCityId = sub.id;
                     console.log(`[Ezone] Matched Sub-city: ${sub.text} (ID: ${subCityId})`);
                     break;
@@ -557,7 +558,7 @@ function matchMultipleVariants(variants, notes, message, requestedQty) {
 /**
  * Place the order on Ezone
  */
-async function placeOrder(token, customerId, addressId, productId, variantId, quantity = 1) {
+async function placeOrder(token, customerId, addressId, productId, variantId = null, quantity = 1, orderNotes = '') {
     try {
         let items = [];
         if (Array.isArray(productId)) {
@@ -578,6 +579,9 @@ async function placeOrder(token, customerId, addressId, productId, variantId, qu
             customerId: customerId,
             addressId: addressId,
             paymentType: 1, // Cash on Delivery
+            notes: orderNotes,
+            note: orderNotes,
+            remarks: orderNotes,
             items: items.map(item => ({
                 productId: parseInt(item.productId, 10),
                 variantId: parseInt(item.variantId, 10),
