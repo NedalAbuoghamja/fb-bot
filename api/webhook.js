@@ -262,9 +262,6 @@ async function handleComment(event) {
                     const variants = await ezoneClient.getVariants(ezoneToken, prod.key);
                     const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                     stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                    if (variants[0] && typeof variants[0].price !== 'undefined') {
-                        livePrice = variants[0].price;
-                    }
                 } catch (err) {
                     stockStatus = parseInt(prod.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                 }
@@ -284,13 +281,6 @@ async function handleComment(event) {
             if (redis && matchedProducts[0]) {
                 const firstProd = matchedProducts[0];
                 let livePrice = firstProd.price;
-                try {
-                    const ezoneToken = await ezoneClient.getScopedToken(redis);
-                    const variants = await ezoneClient.getVariants(ezoneToken, firstProd.key);
-                    if (variants[0] && typeof variants[0].price !== 'undefined') {
-                        livePrice = variants[0].price;
-                    }
-                } catch (e) {}
                 await redis.set(`last_product:${from.id}`, JSON.stringify({
                     ...firstProd,
                     price: `${livePrice} د.ل`,
@@ -335,9 +325,6 @@ async function handleComment(event) {
                     const variants = await ezoneClient.getVariants(ezoneToken, product.key);
                     const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                     stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                    if (variants[0] && typeof variants[0].price !== 'undefined') {
-                        livePrice = variants[0].price;
-                    }
                 } catch (ezoneErr) {
                     console.error("[Webhook] Ezone stock check failed for comment:", ezoneErr.message);
                     stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
@@ -682,9 +669,6 @@ async function handleMessage(event, host) {
                                 const variants = await ezoneClient.getVariants(ezoneToken, prod.key);
                                 const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                                 stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                                if (variants[0] && typeof variants[0].price !== 'undefined') {
-                                    livePrice = variants[0].price;
-                                }
                             } catch (err) {
                                 stockStatus = parseInt(prod.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                             }
@@ -698,13 +682,6 @@ async function handleMessage(event, host) {
                         if (matchedProducts[0]) {
                             const firstProd = matchedProducts[0];
                             let livePrice = firstProd.price;
-                            try {
-                                const ezoneToken = await ezoneClient.getScopedToken(redis);
-                                const variants = await ezoneClient.getVariants(ezoneToken, firstProd.key);
-                                if (variants[0] && typeof variants[0].price !== 'undefined') {
-                                    livePrice = variants[0].price;
-                                }
-                            } catch (e) {}
                             await redis.set(`last_product:${senderId}`, JSON.stringify({
                                 ...firstProd,
                                 price: `${livePrice} د.ل`,
@@ -769,9 +746,6 @@ async function handleMessage(event, host) {
                     const variants = await ezoneClient.getVariants(ezoneToken, matchedProduct.key);
                     totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                     stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                    if (variants[0] && typeof variants[0].price !== 'undefined') {
-                        livePrice = variants[0].price;
-                    }
                 } catch (ezoneErr) {
                     stockStatus = parseInt(matchedProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                     totalStock = parseInt(matchedProduct.stock) || 0;
@@ -1180,14 +1154,6 @@ async function handleMessage(event, host) {
                 
                 // Fetch dynamic price of variant to store in order items
                 let itemPrice = parseFloat(lastProd.price) || 0;
-                try {
-                    const ezoneToken = await ezoneClient.getScopedToken(redis);
-                    const variants = await ezoneClient.getVariants(ezoneToken, lastProd.key);
-                    const cv = variants.find(v => String(v.variantId) === currentVarId);
-                    if (cv && typeof cv.price !== 'undefined') {
-                        itemPrice = cv.price;
-                    }
-                } catch (pe) {}
 
                 order.items.push({
                     productId: lastProd.key,
@@ -1323,9 +1289,6 @@ async function handleMessage(event, host) {
                         const variants = await ezoneClient.getVariants(ezoneToken, nextProduct.key);
                         totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                         stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                        if (variants[0] && typeof variants[0].price !== 'undefined') {
-                            livePrice = variants[0].price;
-                        }
                     } catch (ezoneErr) {
                         stockStatus = parseInt(nextProduct.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                         totalStock = parseInt(nextProduct.stock) || 0;
@@ -1394,9 +1357,6 @@ async function handleMessage(event, host) {
                         const variants = await ezoneClient.getVariants(ezoneToken, matchedProdAwaiting.key);
                         totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                         stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                        if (variants[0] && typeof variants[0].price !== 'undefined') {
-                            livePrice = variants[0].price;
-                        }
                     } catch (ezoneErr) {
                         stockStatus = parseInt(matchedProdAwaiting.stock) > 0 ? "متوفر ✅" : "نفد ❌";
                         totalStock = parseInt(matchedProdAwaiting.stock) || 0;
