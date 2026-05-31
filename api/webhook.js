@@ -193,13 +193,19 @@ async function handleComment(event) {
 
         // Handle collection post if user didn't specify a code
         if (!product && (postText.includes("تشكيلة مميزة") || postText.includes("كل صورة عليها كود"))) {
-            await replyToCommentPublicly(comment_id, "مرحباً بك! يرجى تحديد كود المنتج الذي ترغب بحجزه في تعليق (مثال: حجز كود 58) لكي يقوم البوت بإتمام الحجز لك 🌸");
+            await replyToCommentPublicly(comment_id, "تم الرد فالخاص! 🌸");
+            
+            const privateMsg = `مرحباً بك! يرجى تحديد كود المنتج الذي ترغب بحجزه (مثال: كود 58) لكي نقوم بمساعدتك وإتمام الحجز لك 🌸`;
+            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                recipient: { comment_id },
+                message: { text: privateMsg }
+            });
             return;
         }
 
         if (!product) {
-            const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا تواصلك معنا. للحجز أو الاستفسار يرجى مراسلتنا هنا في الخاص أو كتابة "كود المنتج" الذي ترغب به في تعليق.`;
-            await replyToCommentPublicly(comment_id, "تم الرد على الخاص 🌹");
+            const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا تواصلك معنا. للحجز أو الاستفسار يرجى إرسال كود المنتج الذي ترغب به هنا في الخاص لكي نتمكن من مساعدتك 🌹`;
+            await replyToCommentPublicly(comment_id, "تم الرد فالخاص 🌹");
             await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
                 recipient: { comment_id },
                 message: { text: generalReplyMsg }
@@ -211,12 +217,16 @@ async function handleComment(event) {
             await likeComment(comment_id);
             
             let stockStatus = "نفد ❌";
+            let livePrice = product.price;
             if (product.key) {
                 try {
                     const ezoneToken = await ezoneClient.getScopedToken(redis);
                     const variants = await ezoneClient.getVariants(ezoneToken, product.key);
                     const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
                     stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
+                    if (variants[0] && typeof variants[0].price !== 'undefined') {
+                        livePrice = variants[0].price;
+                    }
                 } catch (ezoneErr) {
                     console.error("[Webhook] Ezone stock check failed for comment:", ezoneErr.message);
                     stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
@@ -230,9 +240,9 @@ async function handleComment(event) {
             
 🏷️ المنتج: ${product.name}
 🔢 الكود: ${product.sku}
-💰 السعر: ${product.price} د.ل${sizesStr}
+💰 السعر: ${livePrice} د.ل${sizesStr}
 ✅ حالة المخزون: ${stockStatus}
-
+ 
 📝 للحجز، أرسل كلمة "حجز" هنا في الخاص وسجل طلبك!`;
             
             const productID = product.key || product.id || product.sku;
@@ -241,7 +251,7 @@ async function handleComment(event) {
             await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
             
             console.log("Sending private reply via Messages API...");
-            let pReply = await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
                 recipient: { comment_id },
                 message: { text: msg }
             });
@@ -250,7 +260,7 @@ async function handleComment(event) {
                 try {
                     await redis.set(`last_product:${from.id}`, JSON.stringify({
                         ...product,
-                        price: `${product.price} د.ل`,
+                        price: `${livePrice} د.ل`,
                         img: product.img || ""
                     }), 'EX', 86400);
                 } catch (re) { console.error("Redis Save Error:", re.message); }
@@ -258,6 +268,8 @@ async function handleComment(event) {
         }
     } catch (e) { console.error("Comment Error:", e.message); }
 }
+
+
 
 async function sendSizeSelection(senderId, redis, lastProd, stateKey, isFirstTime = true, excludedVariantIds = []) {
     if (!lastProd || !lastProd.key) {
