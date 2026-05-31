@@ -543,7 +543,13 @@ async function handleMessage(event, host) {
         const stateKey = `user_state:${senderId}`;
         const orderKey = `order:${senderId}`;
 
-        if (messageText.toLowerCase().includes("حجز")) {
+        let state = await redis.get(stateKey);
+        const isStartBookingTrigger = 
+            (messageText.trim().toLowerCase() === "حجز") || 
+            (quickReplyPayload === "START_BOOKING") || 
+            (!state && (messageText.toLowerCase().includes("حجز") || messageText.toLowerCase().includes("الحجز")));
+
+        if (isStartBookingTrigger) {
             const lastProd = JSON.parse(await redis.get(`last_product:${senderId}`) || "{}");
             if (!lastProd.key) {
                 await redis.set(stateKey, "AWAITING_PRODUCT_INFO");
@@ -575,7 +581,6 @@ async function handleMessage(event, host) {
             return;
         }
 
-        let state = await redis.get(stateKey);
         if (!state) {
             // Check if user sent an image attachment
             if (event.message.attachments && event.message.attachments.some(att => att.type === 'image')) {
@@ -1002,7 +1007,7 @@ async function handleMessage(event, host) {
                         await redis.set(stateKey, "ASKING_ADD_PRODUCT");
                         const addProductReplies = [
                             { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
-                            { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                            { title: "💳 لا، أكمل الطلب", payload: "ADD_PRODUCT:NO" }
                         ];
                         await sendMessage(senderId, "هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
                     }
@@ -1010,7 +1015,7 @@ async function handleMessage(event, host) {
                     await redis.set(stateKey, "ASKING_ADD_PRODUCT");
                     const addProductReplies = [
                         { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
-                        { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                        { title: "💳 لا، أكمل الطلب", payload: "ADD_PRODUCT:NO" }
                     ];
                     await sendMessage(senderId, "هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
                 } else {
@@ -1044,7 +1049,7 @@ async function handleMessage(event, host) {
                 } else {
                     const addProductReplies = [
                         { title: "🛍️ نعم، إضافة منتج آخر", payload: "ADD_PRODUCT:YES" },
-                        { title: "💳 لا، أكمل الحجز", payload: "ADD_PRODUCT:NO" }
+                        { title: "💳 لا، أكمل الطلب", payload: "ADD_PRODUCT:NO" }
                     ];
                     await sendMessage(senderId, "الرجاء اختيار أحد الخيارات: هل ترغب في إضافة منتج/موديل آخر للطلب؟ 👇", addProductReplies);
                 }
@@ -1052,7 +1057,7 @@ async function handleMessage(event, host) {
 
             case "AWAITING_ADDITIONAL_PRODUCT_CODE":
                 const normText = ezoneClient.normalizeArabic(messageText).trim();
-                if (normText === "تخطي" || normText === "لا" || normText === "اكمل الحجز" || normText === "لا يوجد") {
+                if (normText === "تخطي" || normText === "لا" || normText === "اكمل الطلب" || normText === "لا يوجد") {
                     await redis.set(stateKey, "ASKING_NOTES");
                     await sendMessage(senderId, "أي ملاحظات إضافية على الطلب؟ (أو اكتب 'لا يوجد'):");
                     return;
