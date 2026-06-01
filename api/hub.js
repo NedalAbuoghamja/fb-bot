@@ -164,16 +164,7 @@ module.exports = async (req, res) => {
             </header>
 
             <div class="grid">
-                <!-- لوحة الحجوزات -->
-                <a href="/api/orders" target="_blank" class="card">
-                    <div class="badge">نظام نشط</div>
-                    <div class="card-icon">📋</div>
-                    <div>
-                        <div class="card-title">لوحة الحجوزات</div>
-                        <div class="card-desc">إدارة طلبات الفيسبوك والمسنجر، متابعة حالة الشحنات، وتحديث بيانات الزبائن بشكل فوري.</div>
-                    </div>
-                    <div class="card-link">الدخول للنظام ⮕</div>
-                </a>
+
 
                 <!-- المتجر الإلكتروني -->
                 <a href="https://da-vinci.ezone.ly" target="_blank" class="card">
