@@ -33,8 +33,27 @@ module.exports = async (req, res) => {
     if (action === 'save') {
         if (!redis) return res.status(500).json({ error: "Redis not connected" });
         try {
-            const invoice = req.body;
+            // Robust body parser handles buffers, strings, or unparsed request streams
+            let invoice = req.body;
+            if (typeof invoice === 'string') {
+                invoice = JSON.parse(invoice);
+            } else if (Buffer.isBuffer(invoice)) {
+                invoice = JSON.parse(invoice.toString('utf8'));
+            } else if (invoice === undefined) {
+                const getBody = (r) => {
+                    return new Promise((resolve, reject) => {
+                        let b = '';
+                        r.on('data', chunk => { b += chunk; });
+                        r.on('end', () => { resolve(b); });
+                        r.on('error', err => { reject(err); });
+                    });
+                };
+                const rawBody = await getBody(req);
+                invoice = JSON.parse(rawBody);
+            }
+
             if (!invoice || !invoice.id) return res.status(400).json({ error: "Invalid invoice data" });
+            
             await redis.set(`invoice:${invoice.id}`, JSON.stringify(invoice));
             await redis.sadd('all_invoice_ids', invoice.id);
             return res.status(200).json({ success: true });
@@ -1717,7 +1736,7 @@ const AppState = {
             });
             if (res.ok) {
                 // Fetch fresh copy to ensure correct sorting and ID verification
-                this.loadInvoices();
+                await this.loadInvoices();
             }
         } catch (e) {
             console.error('Error saving to server database:', e);
@@ -1740,7 +1759,7 @@ const AppState = {
                 method: 'POST'
             });
             if (res.ok) {
-                this.loadInvoices();
+                await this.loadInvoices();
             }
         } catch (e) {
             console.error('Error deleting from server database:', e);
@@ -1761,7 +1780,7 @@ const AppState = {
                 method: 'POST'
             });
             if (res.ok) {
-                this.loadInvoices();
+                await this.loadInvoices();
             }
         } catch (e) {
             console.error('Error clearing server database:', e);
@@ -2214,7 +2233,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 6. Save and Print Form submit trigger
     const form = document.getElementById('invoice-form');
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
         e.preventDefault();
         
         // Grab values and compute
@@ -2255,8 +2274,8 @@ document.addEventListener('DOMContentLoaded', () => {
             grandTotal: financialData.grandTotal
         };
 
-        // Save to Database (Sync)
-        AppState.saveInvoice(invoiceData);
+        // Save to Database (Sync) and WAIT for the sync HTTP request to complete
+        await AppState.saveInvoice(invoiceData);
         
         // Open print dialog
         window.print();
