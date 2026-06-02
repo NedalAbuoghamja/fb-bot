@@ -1281,7 +1281,7 @@ select option {
     /* Set page width to 76mm, height to 130mm, no margins */
     @page {
         size: 76mm 130mm;
-        margin: 0;
+        margin: 0 3mm;
     }
 
     /* Hide all workspace items and page scaffolding */
@@ -1291,7 +1291,7 @@ select option {
         margin: 0 !important;
         padding: 0 !important;
         height: auto !important;
-        width: 76mm !important;
+        width: 100% !important;
         overflow: visible !important;
         font-size: 8pt !important;
         line-height: 1.25 !important;
@@ -1301,7 +1301,7 @@ select option {
     .app-container {
         display: block !important;
         height: auto !important;
-        width: 76mm !important;
+        width: 100% !important;
         overflow: visible !important;
     }
 
@@ -1318,7 +1318,7 @@ select option {
         margin: 0 !important;
         padding: 0 !important;
         height: auto !important;
-        width: 76mm !important;
+        width: 100% !important;
         display: block !important;
         overflow: visible !important;
     }
@@ -1327,14 +1327,14 @@ select option {
         display: block !important;
         height: auto !important;
         overflow: visible !important;
-        width: 76mm !important;
+        width: 100% !important;
     }
     
     .preview-panel {
         background: transparent !important;
         padding: 0 !important;
         margin: 0 !important;
-        width: 76mm !important;
+        width: 100% !important;
         display: block !important;
         overflow: visible !important;
     }
@@ -1343,10 +1343,10 @@ select option {
     .invoice-paper {
         border: none !important;
         box-shadow: none !important;
-        width: 76mm !important;
-        max-width: 76mm !important;
+        width: 100% !important;
+        max-width: 100% !important;
         min-height: 0 !important;
-        padding: 1mm 1.5mm !important;
+        padding: 1mm 0 !important;
         margin: 0 !important;
         background: #ffffff !important;
         color: #000000 !important;
