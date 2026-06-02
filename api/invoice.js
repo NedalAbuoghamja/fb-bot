@@ -611,17 +611,111 @@ module.exports = async (req, res) => {
         }
 
         @media print {
+            @page {
+                size: 76mm 130mm;
+                margin: 0 3mm;
+            }
             body {
-                background-color: #ffffff;
-                padding: 0;
-                margin: 0;
+                background-color: #ffffff !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                font-size: 8.5pt !important;
+                line-height: 1.3 !important;
+                font-weight: 500 !important;
+                color: #000000 !important;
+            }
+            /* Force all text elements to pure black for thermal clarity */
+            body, p, div, span, h1, h2, h3, h4, h5, h6, table, tr, td, th, label, strong, b {
+                color: #000000 !important;
+                font-weight: 500 !important;
             }
             .invoice-card {
-                box-shadow: none;
-                border: none;
-                max-width: 100%;
-                padding: 0;
-                margin: 0;
+                box-shadow: none !important;
+                border: none !important;
+                max-width: 100% !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+            .brand-subtitle, .invoice-title, .invoice-number-date, 
+            .customer-card div, .customer-card strong, 
+            .table-headers span, .item-title, .item-variant, .item-qty, .item-price,
+            .summary-row, .summary-label, .summary-val, .payment-note,
+            .grand-total-label, .grand-total-val, .grand-total-val span,
+            .thanks-msg, .footer-address, .footer-contact, .footer-watermark {
+                color: #000000 !important;
+            }
+            .brand-subtitle {
+                font-weight: 700 !important;
+            }
+            .invoice-title {
+                font-weight: 700 !important;
+                font-size: 11pt !important;
+            }
+            .customer-card {
+                background-color: transparent !important;
+                border: 1px dashed #000000 !important;
+                padding: 4px 6px !important;
+                margin-bottom: 6px !important;
+            }
+            .customer-card strong {
+                font-weight: 600 !important;
+            }
+            .gold-divider {
+                height: 1px !important;
+                background-color: #000000 !important;
+                margin: 4px 0 !important;
+                border: none !important;
+            }
+            .burgundy-divider {
+                height: 1px !important;
+                background-color: #000000 !important;
+                margin: 4px 0 !important;
+                border: none !important;
+            }
+            .item-row {
+                border-bottom: 1px dashed #000000 !important;
+                padding: 4px 0 !important;
+                margin-bottom: 4px !important;
+            }
+            .item-title {
+                font-weight: 700 !important;
+                font-size: 8.5pt !important;
+            }
+            .item-variant {
+                font-size: 8pt !important;
+            }
+            .item-qty, .item-price {
+                font-weight: 700 !important;
+                font-size: 9pt !important;
+            }
+            .financial-summary {
+                border-top: 1px dashed #000000 !important;
+                margin-bottom: 6px !important;
+                padding: 4px 0 !important;
+            }
+            .summary-row.text-highlight {
+                border-top: 1px dashed #000000 !important;
+                padding-top: 4px !important;
+            }
+            .grand-total-bar {
+                background-color: transparent !important;
+                border: 1px solid #000000 !important;
+                color: #000000 !important;
+                padding: 6px 10px !important;
+                margin-bottom: 6px !important;
+                box-shadow: none !important;
+            }
+            .grand-total-label {
+                font-size: 10pt !important;
+                font-weight: 700 !important;
+            }
+            .grand-total-val {
+                font-size: 12pt !important;
+                font-weight: 700 !important;
+            }
+            .footer-section {
+                border-top: 1px dashed #000000 !important;
+                padding-top: 6px !important;
             }
             .print-actions {
                 display: none !important;
