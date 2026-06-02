@@ -165,6 +165,16 @@ module.exports = async (req, res) => {
 
             <div class="grid">
 
+                <!-- منظومة الحجوزات والفواتير -->
+                <a href="/api/booking" target="_blank" class="card">
+                    <span class="badge">جديد</span>
+                    <div class="card-icon">📝</div>
+                    <div>
+                        <div class="card-title">منظومة الحجوزات والفواتير</div>
+                        <div class="card-desc">إدخال الحجوزات يدوياً، احتساب قيمة التوصيل للمدن الليبية، وإصدار الفواتير فورياً للطباعة.</div>
+                    </div>
+                    <div class="card-link">فتح المنظومة ⮕</div>
+                </a>
 
                 <!-- المتجر الإلكتروني -->
                 <a href="https://da-vinci.ezone.ly" target="_blank" class="card">
