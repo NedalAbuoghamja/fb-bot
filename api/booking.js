@@ -11,6 +11,11 @@ if (redisUrl) {
 }
 
 module.exports = async (req, res) => {
+    // Disable caching for all responses (HTML and API JSON)
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const action = req.query.action;
 
     if (action === 'list') {
