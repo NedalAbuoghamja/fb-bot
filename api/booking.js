@@ -1,4 +1,77 @@
-﻿module.exports = async (req, res) => {
+﻿const Redis = require('ioredis');
+
+const redisUrl = process.env.REDIS_URL;
+let redis = null;
+if (redisUrl) {
+    try {
+        redis = new Redis(redisUrl);
+    } catch (e) {
+        console.error("Redis connection failed in booking:", e.message);
+    }
+}
+
+module.exports = async (req, res) => {
+    const action = req.query.action;
+
+    if (action === 'list') {
+        if (!redis) return res.status(500).json({ error: "Redis not connected" });
+        try {
+            const ids = await redis.smembers('all_invoice_ids');
+            let invoices = [];
+            if (ids && ids.length > 0) {
+                const keys = ids.map(id => `invoice:${id}`);
+                const data = await redis.mget(keys);
+                invoices = data.filter(Boolean).map(JSON.parse);
+            }
+            invoices.sort((a, b) => new Date(b.date) - new Date(a.date));
+            return res.status(200).json(invoices);
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'save') {
+        if (!redis) return res.status(500).json({ error: "Redis not connected" });
+        try {
+            const invoice = req.body;
+            if (!invoice || !invoice.id) return res.status(400).json({ error: "Invalid invoice data" });
+            await redis.set(`invoice:${invoice.id}`, JSON.stringify(invoice));
+            await redis.sadd('all_invoice_ids', invoice.id);
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'delete') {
+        if (!redis) return res.status(500).json({ error: "Redis not connected" });
+        try {
+            const id = req.query.id;
+            if (!id) return res.status(400).json({ error: "Missing invoice ID" });
+            await redis.del(`invoice:${id}`);
+            await redis.srem('all_invoice_ids', id);
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'clear') {
+        if (!redis) return res.status(500).json({ error: "Redis not connected" });
+        try {
+            const ids = await redis.smembers('all_invoice_ids');
+            if (ids && ids.length > 0) {
+                const keys = ids.map(id => `invoice:${id}`);
+                await redis.del(keys);
+                await redis.del('all_invoice_ids');
+            }
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    // Serve HTML
     const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1588,55 +1661,111 @@ select option {
 
     <!-- Scripts -->
     <script>
-// Application State & LocalStorage Manager
+// Application State & Database Sync Manager
 const AppState = {
     invoices: [],
     currentInvoiceId: null,
     
-    // Load invoices from localStorage
-    loadInvoices() {
+    // Load invoices from database (syncing across devices)
+    async loadInvoices() {
         try {
-            const data = localStorage.getItem('davinci_invoices');
-            this.invoices = data ? JSON.parse(data) : [];
+            const res = await fetch('/api/booking?action=list');
+            if (res.ok) {
+                this.invoices = await res.json();
+                // Update local storage backup
+                try {
+                    localStorage.setItem('davinci_invoices', JSON.stringify(this.invoices));
+                } catch (e) {}
+            } else {
+                throw new Error("Server responded with error status");
+            }
         } catch (e) {
-            console.error('Error loading invoices from localStorage:', e);
-            this.invoices = [];
+            console.warn('Database connection failed, falling back to localStorage:', e);
+            // Fallback to local storage if server is down
+            try {
+                const data = localStorage.getItem('davinci_invoices');
+                this.invoices = data ? JSON.parse(data) : [];
+            } catch (err) {
+                this.invoices = [];
+            }
         }
+        this.renderHistoryList();
     },
     
-    // Save current invoices to localStorage
-    saveInvoices() {
-        try {
-            localStorage.setItem('davinci_invoices', JSON.stringify(this.invoices));
-        } catch (e) {
-            console.error('Error saving invoices to localStorage:', e);
-        }
-    },
-    
-    // Save single invoice (Add or Update)
-    saveInvoice(invoice) {
+    // Save single invoice (Sync to database)
+    async saveInvoice(invoice) {
+        // Optimistic UI update: show in list immediately
         const index = this.invoices.findIndex(inv => inv.id === invoice.id);
         if (index > -1) {
             this.invoices[index] = invoice;
         } else {
             this.invoices.push(invoice);
         }
-        this.saveInvoices();
         this.renderHistoryList();
+
+        // Local storage backup
+        try {
+            localStorage.setItem('davinci_invoices', JSON.stringify(this.invoices));
+        } catch (e) {}
+
+        // Send to remote database
+        try {
+            const res = await fetch('/api/booking?action=save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(invoice)
+            });
+            if (res.ok) {
+                // Fetch fresh copy to ensure correct sorting and ID verification
+                this.loadInvoices();
+            }
+        } catch (e) {
+            console.error('Error saving to server database:', e);
+        }
     },
     
-    // Delete single invoice
-    deleteInvoice(id) {
+    // Delete single invoice (Sync to database)
+    async deleteInvoice(id) {
+        // Optimistic UI update
         this.invoices = this.invoices.filter(inv => inv.id !== id);
-        this.saveInvoices();
         this.renderHistoryList();
+
+        // Local storage backup
+        try {
+            localStorage.setItem('davinci_invoices', JSON.stringify(this.invoices));
+        } catch (e) {}
+
+        try {
+            const res = await fetch(\`/api/booking?action=delete&id=\${id}\`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                this.loadInvoices();
+            }
+        } catch (e) {
+            console.error('Error deleting from server database:', e);
+        }
     },
     
     // Clear all history
-    clearAll() {
+    async clearAll() {
         this.invoices = [];
-        this.saveInvoices();
         this.renderHistoryList();
+
+        try {
+            localStorage.removeItem('davinci_invoices');
+        } catch (e) {}
+
+        try {
+            const res = await fetch('/api/booking?action=clear', {
+                method: 'POST'
+            });
+            if (res.ok) {
+                this.loadInvoices();
+            }
+        } catch (e) {
+            console.error('Error clearing server database:', e);
+        }
     },
 
     // Generate unique Invoice ID (DV-YYMMDD-XXXX)
@@ -2044,7 +2173,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 1. Initial State Load
     AppState.loadInvoices();
     resetInvoiceForm();
-    AppState.renderHistoryList();
 
     // 2. City Shipping rate triggers
     const citySelect = document.getElementById('customer-city');
@@ -2127,7 +2255,7 @@ document.addEventListener('DOMContentLoaded', () => {
             grandTotal: financialData.grandTotal
         };
 
-        // Save to Database (LocalStorage)
+        // Save to Database (Sync)
         AppState.saveInvoice(invoiceData);
         
         // Open print dialog
