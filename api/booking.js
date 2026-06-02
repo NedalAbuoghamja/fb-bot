@@ -1183,6 +1183,83 @@ select option {
     }
 }
 
+/* Mobile responsive styling overrides */
+@media (max-width: 768px) {
+    body {
+        font-size: 13px;
+    }
+    
+    .main-header {
+        padding: 0 16px;
+        height: auto;
+        padding-top: 15px;
+        padding-bottom: 15px;
+        flex-direction: column;
+        gap: 12px;
+        text-align: center;
+    }
+    
+    .form-panel, .preview-panel {
+        padding: 12px;
+    }
+    
+    .invoice-paper {
+        padding: 24px 16px;
+        min-height: auto;
+    }
+    
+    .invoice-print-header {
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        text-align: center;
+    }
+    
+    .invoice-title-block {
+        text-align: center;
+    }
+    
+    .invoice-details-grid {
+        grid-template-columns: 1fr;
+        gap: 20px;
+    }
+    
+    .left-align-desktop {
+        border-right: none;
+        border-bottom: 2px solid #f1f5f9;
+        padding-right: 0;
+        padding-bottom: 20px;
+    }
+    
+    .invoice-summary-block {
+        width: 100%;
+        margin-right: 0;
+    }
+    
+    .contact-info {
+        flex-direction: column;
+        gap: 8px;
+    }
+    
+    .qr-codes-container {
+        gap: 20px;
+    }
+    
+    .qr-code-img {
+        width: 70px;
+        height: 70px;
+    }
+    
+    .form-row {
+        flex-direction: column;
+        gap: 0;
+    }
+    
+    .col-6 {
+        width: 100%;
+    }
+}
+
 /* ==========================================================================
    PRINTER SPECIFIC STYLES (Triggers automatically on window.print())
    ========================================================================== */
@@ -1292,6 +1369,28 @@ select option {
     
     .qr-code-img {
         border: 1px solid #000000 !important;
+    }
+    
+    /* Ensure layouts reset to desktop structure on paper print regardless of viewport */
+    .invoice-print-header {
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        text-align: right !important;
+    }
+    
+    .invoice-title-block {
+        text-align: left !important;
+    }
+    
+    .invoice-details-grid {
+        grid-template-columns: 1.2fr 0.8fr !important;
+    }
+    
+    .left-align-desktop {
+        border-right: 2px solid #f1f5f9 !important;
+        border-bottom: none !important;
+        padding-right: 24px !important;
+        padding-bottom: 0 !important;
     }
 }
 
