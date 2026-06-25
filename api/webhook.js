@@ -1706,10 +1706,10 @@ module.exports = async (req, res) => {
                                  if (ev.message.is_echo) {
                                      await handleAdminEcho(ev);
                                  } else {
-                                     await handleMessage(ev, req.headers.host);
+                                     console.log("Ignoring user direct message. Admin will reply manually.");
                                  }
                              } else if (ev.postback) {
-                                await handlePostback(ev);
+                                 console.log("Ignoring postback event. Admin will reply manually.");
                             }
                         }
                     }
