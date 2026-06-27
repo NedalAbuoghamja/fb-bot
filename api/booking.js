@@ -1,4 +1,5 @@
 ﻿const Redis = require('ioredis');
+const axios = require('axios');
 
 const redisUrl = process.env.REDIS_URL;
 let redis = null;
@@ -10,6 +11,35 @@ if (redisUrl) {
     }
 }
 
+const FB_DB_URL = "https://davinci-a9db7-default-rtdb.firebaseio.com";
+const API_KEY = "AIzaSyAcP3Ud60BC-RKD7bYVBx8bcro--L4mkLQ";
+const EMAIL = "nedal@davinci.com";
+const PASSWORD = "111111";
+
+let cachedToken = null;
+let tokenExpiresAt = 0;
+
+async function getFirebaseAuthToken() {
+    if (cachedToken && Date.now() < tokenExpiresAt) {
+        return cachedToken;
+    }
+    try {
+        console.log("Signing in to Firebase Auth for booking...");
+        const res = await axios.post(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, {
+            email: EMAIL,
+            password: PASSWORD,
+            returnSecureToken: true
+        });
+        cachedToken = res.data.idToken;
+        const expiresIn = parseInt(res.data.expiresIn) || 3600;
+        tokenExpiresAt = Date.now() + (expiresIn * 1000) - 300000;
+        return cachedToken;
+    } catch (e) {
+        console.error("Firebase Auth failed in booking:", e.message);
+        throw e;
+    }
+}
+
 module.exports = async (req, res) => {
     // Disable caching for all responses (HTML and API JSON)
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -17,6 +47,17 @@ module.exports = async (req, res) => {
     res.setHeader('Expires', '0');
 
     const action = req.query.action;
+
+    if (action === 'products') {
+        try {
+            const token = await getFirebaseAuthToken();
+            const dbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 10000 });
+            return res.status(200).json(dbRes.data);
+        } catch (err) {
+            console.error("Failed to fetch products for booking:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
 
     if (action === 'list') {
         if (!redis) return res.status(500).json({ error: "Redis not connected" });
@@ -1667,6 +1708,70 @@ select option {
     }
 }
 
+/* Autocomplete search dropdown & Stock Helper styles */
+.autocomplete-container {
+    position: relative;
+    width: 100%;
+}
+
+.autocomplete-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    background: #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+}
+
+.autocomplete-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: #f8fafc;
+    text-align: right;
+}
+
+.autocomplete-item:hover {
+    background: #0ea5e9;
+}
+
+.autocomplete-item-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.autocomplete-item-name {
+    font-weight: 600;
+}
+
+.autocomplete-item-sku {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 2px;
+}
+
+.autocomplete-item-stock {
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.stock-available {
+    color: #10b981 !important;
+}
+
+.stock-empty {
+    color: #ef4444 !important;
+}
+
 </style>
 </head>
 <body>
@@ -2082,6 +2187,32 @@ select option {
 const AppState = {
     invoices: [],
     currentInvoiceId: null,
+    products: [],
+
+    // Load products from database
+    async loadProducts() {
+        try {
+            const res = await fetch('/api/booking?action=products');
+            if (res.ok) {
+                const categories = await res.json();
+                const flatProducts = [];
+                for (let catName in categories) {
+                    for (let prodKey in categories[catName]) {
+                        const p = categories[catName][prodKey];
+                        flatProducts.push({
+                            ...p,
+                            category: catName,
+                            key: prodKey
+                        });
+                    }
+                }
+                this.products = flatProducts;
+                console.log(\`Loaded \${this.products.length} products for autocomplete.\`);
+            }
+        } catch (e) {
+            console.error("Failed to load products for autocomplete:", e);
+        }
+    },
     
     // Load invoices from database (syncing across devices)
     async loadInvoices() {
@@ -2386,7 +2517,11 @@ function addProductRow(name = '', qty = 1, price = 0) {
     
     tr.innerHTML = \`
         <td>
-            <input type="text" class="form-item-name" placeholder="مثال: ساعة ذكية..." value="\${name}" required>
+            <div class="autocomplete-container">
+                <input type="text" class="form-item-name" placeholder="مثال: بلوزة صوفية..." value="\${name}" required autocomplete="off">
+                <div class="autocomplete-dropdown" style="display: none;"></div>
+            </div>
+            <div class="form-item-stock-helper" style="font-size: 11px; margin-top: 4px; display: none; font-weight: 600;"></div>
         </td>
         <td>
             <input type="number" class="form-item-qty" min="1" value="\${qty}" required style="text-align: center;">
@@ -2412,6 +2547,32 @@ function addProductRow(name = '', qty = 1, price = 0) {
     const priceInput = tr.querySelector('.form-item-price');
     const rowTotal = tr.querySelector('.form-item-row-total');
     const nameInput = tr.querySelector('.form-item-name');
+    const dropdown = tr.querySelector('.autocomplete-dropdown');
+    const stockHelper = tr.querySelector('.form-item-stock-helper');
+
+    // Helper logic to populate stock helper for pre-loaded invoices
+    const showStockHelperForValue = (val) => {
+        if (!val) {
+            stockHelper.style.display = 'none';
+            return;
+        }
+        const match = val.match(/كود\\s+(\\d+)/);
+        if (match && match[1]) {
+            const p = AppState.products.find(prod => String(prod.sku) === match[1]);
+            if (p) {
+                const stockVal = parseInt(p.stock) || 0;
+                stockHelper.textContent = \`المخزن المتوفر: \${stockVal} قطع\`;
+                stockHelper.className = \`form-item-stock-helper \${stockVal > 0 ? 'stock-available' : 'stock-empty'}\`;
+                stockHelper.style.display = 'block';
+                return;
+            }
+        }
+        stockHelper.style.display = 'none';
+    };
+
+    if (name) {
+        showStockHelperForValue(name);
+    }
 
     const updateRowTotal = () => {
         const q = parseFloat(qtyInput.value) || 0;
@@ -2419,6 +2580,65 @@ function addProductRow(name = '', qty = 1, price = 0) {
         rowTotal.textContent = Number(q * p).toFixed(2);
         calculateAndSync();
     };
+
+    const updateDropdown = () => {
+        const val = nameInput.value.trim().toLowerCase();
+        dropdown.innerHTML = '';
+        if (!val) {
+            dropdown.style.display = 'none';
+            return;
+        }
+
+        const matches = AppState.products.filter(p => {
+            const pName = p.name ? p.name.toLowerCase() : '';
+            const pSku = p.sku ? String(p.sku).toLowerCase() : '';
+            return pName.includes(val) || pSku.includes(val);
+        }).slice(0, 10); // Limit suggestion items
+
+        if (matches.length === 0) {
+            dropdown.style.display = 'none';
+            return;
+        }
+
+        matches.forEach(p => {
+            const item = document.createElement('div');
+            item.className = 'autocomplete-item';
+            
+            const stockVal = parseInt(p.stock) || 0;
+            const stockText = stockVal > 0 ? \`متوفر: \${stockVal} قطعة\` : 'نفد ❌';
+            const stockClass = stockVal > 0 ? 'stock-available' : 'stock-empty';
+            
+            item.innerHTML = \`
+                <div class="autocomplete-item-details">
+                    <span class="autocomplete-item-name">\${p.name}</span>
+                    <span class="autocomplete-item-sku">الكود: \${p.sku} | السعر: \${p.price} د.ل</span>
+                </div>
+                <span class="autocomplete-item-stock \${stockClass}">\${stockText}</span>
+            \`;
+            
+            item.addEventListener('click', () => {
+                nameInput.value = \`\${p.name} - كود \${p.sku}\`;
+                priceInput.value = parseFloat(p.price) || 0;
+                qtyInput.value = 1;
+                
+                stockHelper.textContent = \`المخزن المتوفر: \${stockVal} قطع\`;
+                stockHelper.className = \`form-item-stock-helper \${stockVal > 0 ? 'stock-available' : 'stock-empty'}\`;
+                stockHelper.style.display = 'block';
+                
+                dropdown.style.display = 'none';
+                updateRowTotal();
+            });
+            
+            dropdown.appendChild(item);
+        });
+        
+        dropdown.style.display = 'block';
+    };
+
+    nameInput.addEventListener('input', updateDropdown);
+    nameInput.addEventListener('blur', () => {
+        setTimeout(() => { dropdown.style.display = 'none'; }, 250);
+    });
 
     qtyInput.addEventListener('input', updateRowTotal);
     priceInput.addEventListener('input', updateRowTotal);
@@ -2619,8 +2839,10 @@ function resetInvoiceForm() {
 // Event Listeners initialization on DOM Content Loaded
 document.addEventListener('DOMContentLoaded', () => {
     // 1. Initial State Load
-    AppState.loadInvoices();
-    resetInvoiceForm();
+    AppState.loadProducts().then(() => {
+        AppState.loadInvoices();
+        resetInvoiceForm();
+    });
 
     // 2. City Shipping rate triggers
     const citySelect = document.getElementById('customer-city');
