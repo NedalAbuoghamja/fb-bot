@@ -399,6 +399,31 @@ async function handleAdminEcho(event) {
     }
 }
 
+async function handleComment(event) {
+    const { post_id, comment_id, from, message } = event;
+    if (from.id === FB_PAGE_ID) return;
+
+    try {
+        const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا جداً تواصلك معنا. نحن هنا لمساعدتك في الحصول على أرقى الملابس والأزياء العصرية.\nللحجز أو الاستفسار عن أي منتج، يرجى إرسال كود المنتج أو صورته هنا في الخاص وسيقوم فريق الدعم بمساعدتك وتأكيد طلبك فوراً! 🌹`;
+        
+        console.log(`[Webhook] Replying to comment ${comment_id} from ${from.name || from.id}`);
+        
+        // Like the comment
+        await likeComment(comment_id).catch(e => console.error("Like failed:", e.message));
+
+        // Public Reply
+        await replyToCommentPublicly(comment_id, "تم الرد فالخاص 🌹");
+        
+        // Private Message
+        await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+            recipient: { comment_id },
+            message: { text: generalReplyMsg }
+        });
+        
+        console.log(`[Webhook] Sent introductory reply successfully.`);
+    } catch (e) { console.error("Comment Error:", e.message); }
+}
+
 async function findLearnedReply(messageText) {
     try {
         const token = await getFirebaseAuthToken();
@@ -433,139 +458,7 @@ async function findLearnedReply(messageText) {
     }
 }
 
-async function handleComment(event) {
-    const { post_id, comment_id, from, message } = event;
-    if (from.id === FB_PAGE_ID) return;
-    const userMessage = message || "";
 
-    try {
-        const token = await getFirebaseAuthToken();
-        const fbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 5000 });
-        const categories = fbRes.data || {};
-        
-        const postInfo = await makeRequest(`/${post_id}?fields=message&access_token=${PAGE_ACCESS_TOKEN}`, 'GET');
-        const postText = postInfo ? (postInfo.message || "") : "";
-        
-        // Check if user commented with multiple product SKUs
-        const skus = extractSkus(userMessage);
-        const matchedProducts = findProductsBySkus(categories, skus);
-
-        if (matchedProducts.length > 1) {
-            await likeComment(comment_id);
-            
-            const productsInfo = [];
-            for (const prod of matchedProducts) {
-                let stockStatus = "نفد ❌";
-                let livePrice = prod.price;
-                try {
-                    const ezoneToken = await ezoneClient.getScopedToken(redis);
-                    const variants = await ezoneClient.getVariants(ezoneToken, prod.key);
-                    const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
-                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                } catch (err) {
-                    stockStatus = parseInt(prod.stock) > 0 ? "متوفر ✅" : "نفد ❌";
-                }
-                productsInfo.push(`🏷️ المنتج: ${prod.name}\n🔢 الكود: ${prod.sku}\n💰 السعر: ${livePrice} د.ل\n✅ حالة المخزون: ${stockStatus}`);
-            }
-
-            const commentReplyText = `ردينا عليك فالخاص بالأسعار والتفاصيل لجميع الكودات المطلوبة! 🌹`;
-            await replyToCommentPublicly(comment_id, commentReplyText);
-
-            const privateMsg = `🌹 مرحباً بك! إليك أسعار وتفاصيل الموديلات المطلوبة:\n\n${productsInfo.join("\n\n------------------------\n\n")}\n\n📝 للحجز التلقائي، أرسل كلمة "حجز" وسجل طلبك! 🌸`;
-            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
-                recipient: { comment_id },
-                message: { text: privateMsg }
-            });
-
-            // Set the first product as last_product as a fallback in Redis
-            if (redis && matchedProducts[0]) {
-                const firstProd = matchedProducts[0];
-                let livePrice = firstProd.price;
-                await redis.set(`last_product:${from.id}`, JSON.stringify({
-                    ...firstProd,
-                    price: `${livePrice} د.ل`,
-                    img: firstProd.img || ""
-                }), 'EX', 86400);
-            }
-            return;
-        }
-
-        const product = findProduct(categories, userMessage, postText);
-
-        // Handle collection post if user didn't specify a code
-        if (!product && (postText.includes("تشكيلة مميزة") || postText.includes("كل صورة عليها كود"))) {
-            await replyToCommentPublicly(comment_id, "تم الرد فالخاص! 🌸");
-            
-            const privateMsg = `مرحباً بك! يرجى تحديد كود المنتج الذي ترغب بحجزه (مثال: كود 58) لكي نقوم بمساعدتك وإتمام الحجز لك 🌸`;
-            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
-                recipient: { comment_id },
-                message: { text: privateMsg }
-            });
-            return;
-        }
-
-        if (!product) {
-            const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا تواصلك معنا. للحجز أو الاستفسار يرجى إرسال كود المنتج الذي ترغب به هنا في الخاص لكي نتمكن من مساعدتك 🌹`;
-            await replyToCommentPublicly(comment_id, "تم الرد فالخاص 🌹");
-            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
-                recipient: { comment_id },
-                message: { text: generalReplyMsg }
-            });
-            return;
-        }
-
-        if (product) {
-            await likeComment(comment_id);
-            
-            let stockStatus = "نفد ❌";
-            let livePrice = product.price;
-            if (product.key) {
-                try {
-                    const ezoneToken = await ezoneClient.getScopedToken(redis);
-                    const variants = await ezoneClient.getVariants(ezoneToken, product.key);
-                    const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
-                    stockStatus = totalStock > 0 ? "متوفر ✅" : "نفد ❌";
-                } catch (ezoneErr) {
-                    console.error("[Webhook] Ezone stock check failed for comment:", ezoneErr.message);
-                    stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
-                }
-            } else {
-                stockStatus = parseInt(product.stock) > 0 ? "متوفر ✅" : "نفد ❌";
-            }
-
-            const sizesStr = product.sizes ? `\n📏 المقاسات: ${product.sizes}` : "";
-            const msg = `🌹 مرحباً ${from.name}
-            
-🏷️ المنتج: ${product.name}
-🔢 الكود: ${product.sku}
-💰 السعر: ${livePrice} د.ل${sizesStr}
-✅ حالة المخزون: ${stockStatus}
- 
-📝 للحجز، أرسل كلمة "حجز" هنا في الخاص وسجل طلبك!`;
-            
-            const productID = product.key || product.id || product.sku;
-            const storeLink = `https://da-vinci.ezone.ly/products/${productID}`;
-            console.log("Sending public reply...");
-            await replyToCommentPublicly(comment_id, `ردينا عليك فالخاص! 🌹\nرابط المنتج: ${storeLink}`);
-            
-            console.log("Sending private reply via Messages API...");
-            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
-                recipient: { comment_id },
-                message: { text: msg }
-            });
-
-            if (redis) {
-                try {
-                    await redis.set(`last_product:${from.id}`, JSON.stringify({
-                        ...product,
-                        price: `${livePrice} د.ل`,
-                        img: product.img || ""
-                    }), 'EX', 86400);
-                } catch (re) { console.error("Redis Save Error:", re.message); }
-            }
-        }
-    } catch (e) { console.error("Comment Error:", e.message); }
-}
 
 
 
