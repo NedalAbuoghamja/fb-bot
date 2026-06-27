@@ -404,8 +404,6 @@ async function handleComment(event) {
     if (from.id === FB_PAGE_ID) return;
 
     try {
-        const generalReplyMsg = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا جداً تواصلك معنا. نحن هنا لمساعدتك في الحصول على أرقى الملابس والأزياء العصرية.\nللحجز أو الاستفسار عن أي منتج، يرجى إرسال كود المنتج أو صورته هنا في الخاص وسيقوم فريق الدعم بمساعدتك وتأكيد طلبك فوراً! 🌹`;
-        
         console.log(`[Webhook] Replying to comment ${comment_id} from ${from.name || from.id}`);
         
         // Like the comment
@@ -413,14 +411,62 @@ async function handleComment(event) {
 
         // Public Reply
         await replyToCommentPublicly(comment_id, "تم الرد فالخاص 🌹");
+
+        // Fetch post attachments dynamically
+        let carouselElements = [];
+        try {
+            const attachmentRes = await makeRequest(`/${post_id}/attachments?access_token=${PAGE_ACCESS_TOKEN}`, 'GET');
+            if (attachmentRes && attachmentRes.data && attachmentRes.data[0]) {
+                const mainAttachment = attachmentRes.data[0];
+                let subAttachments = [];
+                
+                if (mainAttachment.type === 'album' && mainAttachment.subattachments && mainAttachment.subattachments.data) {
+                    subAttachments = mainAttachment.subattachments.data;
+                } else if (mainAttachment.type === 'photo') {
+                    subAttachments = [mainAttachment];
+                }
+                
+                carouselElements = subAttachments.slice(0, 10).map(item => {
+                    const imgSrc = item.media && item.media.image && item.media.image.src;
+                    const desc = item.description || "";
+                    const cleanTitle = desc.replace(/\n/g, " | ") || "موديل مميز";
+                    
+                    return {
+                        title: cleanTitle.substring(0, 80),
+                        subtitle: "أرسل كود أو صورة المنتج لحجزه 🌸",
+                        image_url: imgSrc
+                    };
+                }).filter(el => el.image_url);
+            }
+        } catch (attErr) {
+            console.error("Failed to fetch post attachments:", attErr.message);
+        }
         
-        // Private Message
+        const welcomeText = `أهلاً بك في DaVinci Store! 🌸\nيسعدنا جداً تواصلك معنا. نحن هنا لمساعدتك في الحصول على أرقى الملابس والأزياء العصرية.\nتصفح الموديلات بالأسفل 👇 وأرسل كود المنتج أو صورته هنا في الخاص وسيقوم فريق الدعم بمساعدتك وتأكيد طلبك فوراً! 🌹`;
+
+        // Send Welcome Text Message
         await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
             recipient: { comment_id },
-            message: { text: generalReplyMsg }
+            message: { text: welcomeText }
         });
+
+        // Send Carousel if elements exist
+        if (carouselElements.length > 0) {
+            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                recipient: { comment_id },
+                message: {
+                    attachment: {
+                        type: "template",
+                        payload: {
+                            template_type: "generic",
+                            elements: carouselElements
+                        }
+                    }
+                }
+            });
+            console.log(`[Webhook] Sent carousel with ${carouselElements.length} elements.`);
+        }
         
-        console.log(`[Webhook] Sent introductory reply successfully.`);
     } catch (e) { console.error("Comment Error:", e.message); }
 }
 
