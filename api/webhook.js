@@ -426,7 +426,7 @@ async function handleComment(event) {
                     subAttachments = [mainAttachment];
                 }
                 
-                carouselElements = subAttachments.slice(0, 10).map(item => {
+                carouselElements = subAttachments.map(item => {
                     const imgSrc = item.media && item.media.image && item.media.image.src;
                     const desc = item.description || "";
                     const cleanTitle = desc.replace(/\n/g, " | ") || "موديل مميز";
@@ -450,21 +450,24 @@ async function handleComment(event) {
             message: { text: welcomeText }
         });
 
-        // Send Carousel if elements exist
+        // Send Carousel if elements exist (Facebook limit is 10 elements per message, so we chunk them)
         if (carouselElements.length > 0) {
-            await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
-                recipient: { comment_id },
-                message: {
-                    attachment: {
-                        type: "template",
-                        payload: {
-                            template_type: "generic",
-                            elements: carouselElements
+            for (let i = 0; i < carouselElements.length; i += 10) {
+                const chunk = carouselElements.slice(i, i + 10);
+                await makeRequest(`/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, 'POST', {
+                    recipient: { comment_id },
+                    message: {
+                        attachment: {
+                            type: "template",
+                            payload: {
+                                template_type: "generic",
+                                elements: chunk
+                            }
                         }
                     }
-                }
-            });
-            console.log(`[Webhook] Sent carousel with ${carouselElements.length} elements.`);
+                });
+            }
+            console.log(`[Webhook] Sent carousel with ${carouselElements.length} elements in chunks of 10.`);
         }
         
     } catch (e) { console.error("Comment Error:", e.message); }
