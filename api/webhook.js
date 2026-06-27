@@ -426,7 +426,7 @@ async function handleComment(event) {
                     subAttachments = [mainAttachment];
                 }
                 
-                carouselElements = subAttachments.slice(0, 20).map(item => {
+                carouselElements = subAttachments.slice(0, 30).map(item => {
                     const imgSrc = item.media && item.media.image && item.media.image.src;
                     const desc = item.description || "";
                     const cleanTitle = desc.replace(/\n/g, " | ") || "موديل مميز";
