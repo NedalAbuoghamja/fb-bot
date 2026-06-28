@@ -289,6 +289,7 @@ module.exports = async (req, res) => {
                 stock: String(prod.stock),
                 price: String(prod.price),
                 sizes: prod.sizes || "عام",
+                variants: prod.variants || [],
                 img: prod.img || ""
             };
 
@@ -330,6 +331,50 @@ module.exports = async (req, res) => {
             return res.status(200).json({ success: true });
         } catch (err) {
             console.error("Failed to update stock:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'migrate_variants') {
+        try {
+            const token = await getFirebaseAuthToken();
+            const dbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 10000 });
+            const categories = dbRes.data || {};
+            
+            const ezoneClient = require('./ezone_client');
+            const ezoneToken = await ezoneClient.getScopedToken(redis);
+            
+            const results = [];
+            
+            for (const catName in categories) {
+                for (const prodId in categories[catName]) {
+                    const p = categories[catName][prodId];
+                    if (prodId && !isNaN(prodId)) {
+                        console.log(`Migrating product ${prodId} (${p.name})...`);
+                        try {
+                            const variants = await ezoneClient.getVariants(ezoneToken, prodId);
+                            if (variants && variants.length > 0) {
+                                const mappedVariants = variants.map(v => ({
+                                    id: String(v.variantId || v.id),
+                                    size: v.text.trim(),
+                                    stock: parseInt(v.quantity) || 0
+                                }));
+                                
+                                const updateUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(catName)}/${prodId}/variants.json?auth=${token}`;
+                                await axios.put(updateUrl, mappedVariants);
+                                
+                                results.push({ id: prodId, name: p.name, success: true, count: mappedVariants.length });
+                            }
+                        } catch (err) {
+                            results.push({ id: prodId, name: p.name, success: false, error: err.message });
+                        }
+                    }
+                }
+            }
+            
+            return res.status(200).json({ message: "Migration completed", results });
+        } catch (err) {
+            console.error("Migration failed:", err.message);
             return res.status(500).json({ error: err.message });
         }
     }
@@ -2581,15 +2626,18 @@ select option {
                             </div>
                         </div>
                         
-                        <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 15px;">
-                            <div class="form-group col-6" style="flex: 1;">
-                                <label for="modal-product-stock" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">الكمية بالمخزن <span class="required" style="color: var(--danger);">*</span></label>
-                                <input type="number" id="modal-product-stock" min="0" value="10" required style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                        <!-- Dynamic Variants Builder Section -->
+                        <div style="border: 1px dashed var(--bg-surface-border); border-radius: var(--border-radius-md); padding: 16px; margin-bottom: 15px; background: rgba(255,255,255,0.01);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <span style="font-size: 12px; font-weight: 600; color: var(--text-primary);">المقاسات والكميات المتوفرة</span>
+                                <button type="button" id="btn-add-modal-variant" class="btn btn-sm btn-primary-outline" style="padding: 2px 8px; font-size: 11px; background: none; border: 1px solid var(--primary); color: var(--primary); border-radius: 4px; cursor: pointer;">إضافة مقاس جديد</button>
                             </div>
-                            <div class="form-group col-6" style="flex: 1;">
-                                <label for="modal-product-sizes" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">المقاسات المتاحة</label>
-                                <input type="text" id="modal-product-sizes" placeholder="مثال: S، M، L أو عام" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            <div id="modal-variants-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; padding-right: 4px;">
+                                <!-- Variant Rows will be injected here -->
                             </div>
+                            <!-- Legacy inputs hidden but maintained for form references -->
+                            <input type="hidden" id="modal-product-stock" value="0">
+                            <input type="hidden" id="modal-product-sizes" value="">
                         </div>
                         
                         <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 20px;">
@@ -3466,6 +3514,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Dynamic variants button
+    document.getElementById('btn-add-modal-variant').addEventListener('click', () => {
+        addModalVariantRow();
+    });
+
     // Product Modal form submit
     document.getElementById('product-modal-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -3584,7 +3637,20 @@ function renderInventoryTable() {
             <td style="padding: 12px; color: var(--text-secondary); vertical-align: middle;">\${p.category}</td>
             <td style="padding: 12px; text-align: center; font-family: var(--font-en); vertical-align: middle; color: var(--primary); font-weight: 600;">\${p.sku}</td>
             <td style="padding: 12px; text-align: center; font-family: var(--font-en); vertical-align: middle; font-weight: bold;">\${p.price} د.ل</td>
-            <td style="padding: 12px; color: var(--text-secondary); vertical-align: middle; font-size: 13px;">\${p.sizes || 'عام'}</td>
+            <td style="padding: 12px; color: var(--text-secondary); vertical-align: middle; font-size: 13px;">
+                \${p.variants && Array.isArray(p.variants) && p.variants.length > 0
+                    ? p.variants.map(v => {
+                        const vStock = parseInt(v.stock) || 0;
+                        const vStockClass = vStock <= 0 ? 'stock-empty' : (vStock < 5 ? 'stock-low' : 'stock-available');
+                        return \`<div class="variant-display-row" style="margin-bottom: 5px; text-align: right; line-height: 1.4;">
+                            <span style="font-weight: 600; color: var(--text-primary);">\${v.size}</span>
+                            <span style="color: var(--text-muted); font-size: 11px;">(كود: \${v.id})</span>
+                            <span class="\${vStockClass}" style="font-size: 11px; font-weight: bold; margin-right: 4px;">[\${vStock} قطعة]</span>
+                        </div>\`;
+                      }).join('')
+                    : \`<span style="color: var(--text-secondary);">\${p.sizes || 'عام'}</span>\`
+                }
+            </td>
             <td style="padding: 12px; text-align: center; vertical-align: middle;">
                 <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
                     <input type="number" class="quick-stock-input" value="\${stockVal}" min="0" style="width: 60px; text-align: center; background: rgba(0,0,0,0.2); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); color: var(--text-primary); padding: 4px; font-family: var(--font-en);">
@@ -3666,6 +3732,48 @@ function renderInventoryTable() {
     });
 }
 
+function addModalVariantRow(v = null) {
+    const list = document.getElementById('modal-variants-list');
+    const row = document.createElement('div');
+    row.className = 'modal-variant-row';
+    row.style.display = 'flex';
+    row.style.gap = '10px';
+    row.style.alignItems = 'center';
+    
+    const sizeVal = v ? v.size : '';
+    const idVal = v ? v.id : '';
+    const stockVal = v ? v.stock : 10;
+
+    row.innerHTML = \`
+        <input type="text" class="variant-size-input" placeholder="المقاس (S, M, 4 سنوات...)" value="\${sizeVal}" required style="flex: 1.5; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 8px 10px; color: var(--text-primary); font-size: 13px; outline: none;">
+        <input type="text" class="variant-code-input" placeholder="الكود" value="\${idVal}" required style="flex: 1.2; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 8px 10px; color: var(--text-primary); font-size: 13px; outline: none; font-family: var(--font-en);">
+        <input type="number" class="variant-stock-input" placeholder="الكمية" value="\${stockVal}" min="0" required style="width: 70px; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 8px 10px; color: var(--text-primary); font-size: 13px; outline: none; text-align: center; font-family: var(--font-en);">
+        <button type="button" class="btn-delete-modal-variant" style="background: none; border: none; color: var(--danger); cursor: pointer; padding: 4px; font-size: 20px; line-height: 1; font-weight: bold;">×</button>
+    \`;
+
+    // Bind delete row button
+    row.querySelector('.btn-delete-modal-variant').addEventListener('click', () => {
+        if (list.children.length > 1) {
+            row.remove();
+        } else {
+            alert('يجب أن يحتوي المنتج على مقاس واحد على الأقل.');
+        }
+    });
+
+    list.appendChild(row);
+}
+
+function renderModalVariants(variantsArray) {
+    const list = document.getElementById('modal-variants-list');
+    list.innerHTML = '';
+    
+    if (variantsArray && variantsArray.length > 0) {
+        variantsArray.forEach(v => addModalVariantRow(v));
+    } else {
+        addModalVariantRow({ size: 'عام', id: 'عام', stock: 10 });
+    }
+}
+
 function openProductModal(prod = null) {
     const modal = document.getElementById('product-modal');
     const form = document.getElementById('product-modal-form');
@@ -3683,16 +3791,34 @@ function openProductModal(prod = null) {
         document.getElementById('modal-product-category').value = prod.category;
         document.getElementById('modal-product-sku').value = prod.sku;
         document.getElementById('modal-product-price').value = prod.price;
-        document.getElementById('modal-product-stock').value = prod.stock;
-        document.getElementById('modal-product-sizes').value = prod.sizes || '';
         document.getElementById('modal-product-ezone-id').value = (prod.key && !isNaN(prod.key)) ? prod.key : '';
         document.getElementById('modal-product-img').value = prod.img || '';
+
+        // Extract/build variants
+        let variants = [];
+        if (prod.variants && Array.isArray(prod.variants)) {
+            variants = prod.variants;
+        } else if (prod.sizes) {
+            // Parse legacy sizes and assign SKU-based codes
+            const sizeList = prod.sizes.split(/[,،]/).map(s => s.trim()).filter(Boolean);
+            const totalStock = parseInt(prod.stock) || 0;
+            const splitStock = Math.ceil(totalStock / Math.max(1, sizeList.length));
+            variants = sizeList.map((size, idx) => ({
+                size,
+                id: prod.sku ? \`\${prod.sku}-\${size}\` : \`sz_\${idx}_\${Date.now()}\`,
+                stock: splitStock
+            }));
+        } else {
+            // Fallback for single legacy product without size
+            variants = [{ size: 'عام', id: prod.sku || 'عام', stock: parseInt(prod.stock) || 0 }];
+        }
+        renderModalVariants(variants);
+
     } else {
         title.textContent = 'إضافة منتج جديد للمخزن';
         document.getElementById('modal-product-id').value = '';
         document.getElementById('modal-product-old-category').value = '';
-        document.getElementById('modal-product-stock').value = '10';
-        document.getElementById('modal-product-sizes').value = 'عام';
+        renderModalVariants([{ size: 'عام', id: 'عام', stock: 10 }]);
     }
     
     modal.style.display = 'flex';
@@ -3708,8 +3834,6 @@ async function saveProductForm() {
     const name = document.getElementById('modal-product-name').value;
     const sku = document.getElementById('modal-product-sku').value.trim();
     const price = document.getElementById('modal-product-price').value;
-    const stock = document.getElementById('modal-product-stock').value;
-    const sizes = document.getElementById('modal-product-sizes').value;
     const ezoneId = document.getElementById('modal-product-ezone-id').value.trim();
     const img = document.getElementById('modal-product-img').value;
 
@@ -3723,6 +3847,33 @@ async function saveProductForm() {
         return;
     }
 
+    // Collect variants from builder
+    const variantRows = document.querySelectorAll('.modal-variant-row');
+    const variants = [];
+    let totalStock = 0;
+    let sizesList = [];
+
+    variantRows.forEach(row => {
+        const sizeInput = row.querySelector('.variant-size-input');
+        const codeInput = row.querySelector('.variant-code-input');
+        const stockInput = row.querySelector('.variant-stock-input');
+        
+        const size = sizeInput.value.trim();
+        const vid = codeInput.value.trim();
+        const stock = parseInt(stockInput.value) || 0;
+
+        if (size && vid) {
+            variants.push({ id: vid, size, stock });
+            totalStock += stock;
+            sizesList.push(size);
+        }
+    });
+
+    if (variants.length === 0) {
+        alert('الرجاء إضافة مقاس واحد على الأقل للمنتج.');
+        return;
+    }
+
     const payload = {
         id: id || ezoneId || \`local_\${Date.now()}\`,
         oldCategory,
@@ -3730,8 +3881,9 @@ async function saveProductForm() {
         category,
         sku,
         price,
-        stock,
-        sizes,
+        stock: String(totalStock),
+        sizes: sizesList.join('، '),
+        variants,
         img
     };
 
