@@ -33,7 +33,7 @@ async function fetchNewScopedToken() {
         const loginRes = await fetch('https://my.ezone.ly/login', {
             method: 'POST',
             headers: {
-                'next-action': '40d9e14828949c35a7c950d6aa5409a690e25394da',
+                'next-action': '408795c315e012a22b3b3b81a1f7d88da9f1d70ca9',
                 'Content-Type': 'text/plain;charset=UTF-8',
                 'Accept': 'text/x-component',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -58,7 +58,7 @@ async function fetchNewScopedToken() {
         const selectRes = await fetch('https://my.ezone.ly/login', {
             method: 'POST',
             headers: {
-                'next-action': '60ebebcdcf8f4ee64c9b95617eb70e7932d61ded20',
+                'next-action': '6084f6f1e609831c497045840703f3af223821e56d',
                 'Content-Type': 'text/plain;charset=UTF-8',
                 'Accept': 'text/x-component',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
