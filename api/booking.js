@@ -1,4 +1,4 @@
-﻿const Redis = require('ioredis');
+const Redis = require('ioredis');
 const axios = require('axios');
 
 const redisUrl = process.env.REDIS_URL;
@@ -40,8 +40,79 @@ async function getFirebaseAuthToken() {
     }
 }
 
+async function adjustStockInFirebase(itemsWithDeltas) {
+    try {
+        const token = await getFirebaseAuthToken();
+        const dbRes = await axios.get(`${FB_DB_URL}/store_master_v5/products.json?auth=${token}`, { timeout: 10000 });
+        const categories = dbRes.data || {};
+        
+        for (const item of itemsWithDeltas) {
+            const { sku, delta } = item;
+            if (delta === 0) continue;
+            
+            let foundCat = null;
+            let foundKey = null;
+            let foundProduct = null;
+            
+            // 1. Search by SKU
+            for (const catName in categories) {
+                for (const prodKey in categories[catName]) {
+                    const p = categories[catName][prodKey];
+                    if (p && String(p.sku).trim() === String(sku).trim()) {
+                        foundCat = catName;
+                        foundKey = prodKey;
+                        foundProduct = p;
+                        break;
+                    }
+                }
+                if (foundProduct) break;
+            }
+            
+            // 2. Search by Ezone ID (key)
+            if (!foundProduct) {
+                for (const catName in categories) {
+                    if (categories[catName][sku]) {
+                        foundCat = catName;
+                        foundKey = sku;
+                        foundProduct = categories[catName][sku];
+                        break;
+                    }
+                }
+            }
+            
+            // 3. Search by name suffix
+            if (!foundProduct) {
+                const match = sku.match(/كود\s+(\d+)/);
+                const searchSku = match ? match[1] : sku;
+                for (const catName in categories) {
+                    for (const prodKey in categories[catName]) {
+                        const p = categories[catName][prodKey];
+                        if (p && String(p.sku).trim() === String(searchSku).trim()) {
+                            foundCat = catName;
+                            foundKey = prodKey;
+                            foundProduct = p;
+                            break;
+                        }
+                    }
+                    if (foundProduct) break;
+                }
+            }
+
+            if (foundProduct && foundCat && foundKey) {
+                const currentStock = parseInt(foundProduct.stock) || 0;
+                const newStock = Math.max(0, currentStock - delta);
+                
+                const updateUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(foundCat)}/${foundKey}/stock.json?auth=${token}`;
+                await axios.put(updateUrl, JSON.stringify(String(newStock)));
+                console.log(`[Stock Sync] Adjusted stock for ${foundProduct.name} (SKU: ${sku}): ${currentStock} -> ${newStock}`);
+            }
+        }
+    } catch (e) {
+        console.error("[Stock Sync] Failed to adjust stock in Firebase:", e.message);
+    }
+}
+
 module.exports = async (req, res) => {
-    // Disable caching for all responses (HTML and API JSON)
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -79,7 +150,6 @@ module.exports = async (req, res) => {
     if (action === 'save') {
         if (!redis) return res.status(500).json({ error: "Redis not connected" });
         try {
-            // Robust body parser handles buffers, strings, or unparsed request streams
             let invoice = req.body;
             if (typeof invoice === 'string') {
                 invoice = JSON.parse(invoice);
@@ -100,8 +170,43 @@ module.exports = async (req, res) => {
 
             if (!invoice || !invoice.id) return res.status(400).json({ error: "Invalid invoice data" });
             
+            const oldInvStr = await redis.get(`invoice:${invoice.id}`);
+            const oldInvoice = oldInvStr ? JSON.parse(oldInvStr) : null;
+
             await redis.set(`invoice:${invoice.id}`, JSON.stringify(invoice));
             await redis.sadd('all_invoice_ids', invoice.id);
+
+            const deltas = {};
+            
+            if (invoice.status !== 'ملغي' && invoice.items && invoice.items.length > 0) {
+                invoice.items.forEach(item => {
+                    let sku = item.name;
+                    const match = item.name.match(/كود\s+(\d+)/);
+                    if (match && match[1]) sku = match[1];
+                    deltas[sku] = (deltas[sku] || 0) + (parseInt(item.qty || item.quantity) || 0);
+                });
+            }
+
+            if (oldInvoice && oldInvoice.status !== 'ملغي' && oldInvoice.items && oldInvoice.items.length > 0) {
+                oldInvoice.items.forEach(item => {
+                    let sku = item.name;
+                    const match = item.name.match(/كود\s+(\d+)/);
+                    if (match && match[1]) sku = match[1];
+                    deltas[sku] = (deltas[sku] || 0) - (parseInt(item.qty || item.quantity) || 0);
+                });
+            }
+
+            const itemsWithDeltas = Object.keys(deltas).map(sku => ({
+                sku,
+                delta: deltas[sku]
+            }));
+
+            if (itemsWithDeltas.length > 0) {
+                adjustStockInFirebase(itemsWithDeltas).catch(err => {
+                    console.error("Async stock adjustment failed:", err.message);
+                });
+            }
+
             return res.status(200).json({ success: true });
         } catch (err) {
             return res.status(500).json({ error: err.message });
@@ -113,30 +218,122 @@ module.exports = async (req, res) => {
         try {
             const id = req.query.id;
             if (!id) return res.status(400).json({ error: "Missing invoice ID" });
+
+            const oldInvStr = await redis.get(`invoice:${id}`);
+            const oldInvoice = oldInvStr ? JSON.parse(oldInvStr) : null;
+
             await redis.del(`invoice:${id}`);
             await redis.srem('all_invoice_ids', id);
-            return res.status(200).json({ success: true });
-        } catch (err) {
-            return res.status(500).json({ error: err.message });
-        }
-    }
 
-    if (action === 'clear') {
-        if (!redis) return res.status(500).json({ error: "Redis not connected" });
-        try {
-            const ids = await redis.smembers('all_invoice_ids');
-            if (ids && ids.length > 0) {
-                const keys = ids.map(id => `invoice:${id}`);
-                await redis.del(keys);
-                await redis.del('all_invoice_ids');
+            if (oldInvoice && oldInvoice.status !== 'ملغي' && oldInvoice.items && oldInvoice.items.length > 0) {
+                const deltas = {};
+                oldInvoice.items.forEach(item => {
+                    let sku = item.name;
+                    const match = item.name.match(/كود\s+(\d+)/);
+                    if (match && match[1]) sku = match[1];
+                    deltas[sku] = (deltas[sku] || 0) - (parseInt(item.qty || item.quantity) || 0);
+                });
+
+                const itemsWithDeltas = Object.keys(deltas).map(sku => ({
+                    sku,
+                    delta: deltas[sku]
+                }));
+
+                if (itemsWithDeltas.length > 0) {
+                    adjustStockInFirebase(itemsWithDeltas).catch(err => {
+                        console.error("Async stock restoration failed:", err.message);
+                    });
+                }
             }
+
             return res.status(200).json({ success: true });
         } catch (err) {
             return res.status(500).json({ error: err.message });
         }
     }
 
-    // Serve HTML
+    if (action === 'save_product') {
+        try {
+            let prod = req.body;
+            if (typeof prod === 'string') {
+                prod = JSON.parse(prod);
+            } else if (Buffer.isBuffer(prod)) {
+                prod = JSON.parse(prod.toString('utf8'));
+            } else if (prod === undefined) {
+                const getBody = (r) => {
+                    return new Promise((resolve, reject) => {
+                        let b = '';
+                        r.on('data', chunk => { b += chunk; });
+                        r.on('end', () => { resolve(b); });
+                        r.on('error', err => { reject(err); });
+                    });
+                };
+                const rawBody = await getBody(req);
+                prod = JSON.parse(rawBody);
+            }
+
+            if (!prod || !prod.id || !prod.category || !prod.sku) {
+                return res.status(400).send("Invalid product data");
+            }
+
+            const token = await getFirebaseAuthToken();
+            
+            if (prod.oldCategory && prod.oldCategory !== prod.category) {
+                const oldUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(prod.oldCategory)}/${prod.id}.json?auth=${token}`;
+                await axios.delete(oldUrl).catch(err => console.error("Failed to delete old product category key:", err.message));
+            }
+
+            const savePayload = {
+                name: prod.name,
+                sku: String(prod.sku).trim(),
+                stock: String(prod.stock),
+                price: String(prod.price),
+                sizes: prod.sizes || "عام",
+                img: prod.img || ""
+            };
+
+            const dbUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(prod.category)}/${prod.id}.json?auth=${token}`;
+            await axios.put(dbUrl, savePayload);
+
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            console.error("Failed to save product:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'delete_product') {
+        try {
+            const { id, category } = req.query;
+            if (!id || !category) return res.status(400).send("Missing id or category");
+            
+            const token = await getFirebaseAuthToken();
+            const dbUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(category)}/${id}.json?auth=${token}`;
+            await axios.delete(dbUrl);
+            
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            console.error("Failed to delete product:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    if (action === 'update_stock') {
+        try {
+            const { id, category, stock } = req.query;
+            if (!id || !category || stock === undefined) return res.status(400).send("Missing parameters");
+            
+            const token = await getFirebaseAuthToken();
+            const dbUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(category)}/${id}/stock.json?auth=${token}`;
+            await axios.put(dbUrl, JSON.stringify(String(stock)));
+            
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            console.error("Failed to update stock:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
     const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1772,6 +1969,60 @@ select option {
     color: #ef4444 !important;
 }
 
+/* Navigation Tabs Styling */
+.header-tabs {
+    display: flex;
+    gap: 8px;
+    margin: 0 20px;
+}
+.tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    padding: 8px 16px;
+    font-family: var(--font-ar);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.tab-btn:hover {
+    color: var(--text-primary);
+}
+.tab-btn.active {
+    border-color: var(--primary);
+    color: var(--text-primary);
+}
+.tab-content {
+    display: none;
+}
+.tab-content.active {
+    display: block;
+}
+
+/* Stock Helper Text Styles */
+.stock-low {
+    color: var(--warning) !important;
+}
+
+/* Modal Styling */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(5px);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
 </style>
 </head>
 <body>
@@ -1847,6 +2098,22 @@ select option {
                     <h1>منظومة الحجوزات والفواتير</h1>
                     <p class="subtitle">متجر دافينشي - DaVinci Store</p>
                 </div>
+                <!-- Navigation Tabs -->
+                <div class="header-tabs" style="display: flex; gap: 10px; margin: 0 20px;">
+                    <button class="tab-btn active" id="tab-bookings" style="background: none; border: none; border-bottom: 2px solid var(--primary); color: var(--text-primary); padding: 8px 16px; font-family: var(--font-ar); font-weight: 600; cursor: pointer; transition: all var(--transition-fast); display: flex; align-items: center; gap: 8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon-sm" style="width: 16px; height: 16px;">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        الحجوزات والفواتير
+                    </button>
+                    <button class="tab-btn" id="tab-inventory" style="background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); padding: 8px 16px; font-family: var(--font-ar); font-weight: 600; cursor: pointer; transition: all var(--transition-fast); display: flex; align-items: center; gap: 8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon-sm" style="width: 16px; height: 16px;">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        </svg>
+                        إدارة المخزن
+                    </button>
+                </div>
                 <div class="header-actions">
                     <button class="btn btn-secondary" id="btn-new-invoice">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
@@ -1857,6 +2124,9 @@ select option {
                     </button>
                 </div>
             </header>
+
+            <!-- Bookings View Container -->
+            <div id="view-bookings" class="tab-content active">
 
             <div class="workspace-grid">
                 <!-- Left Panel: Form Input (no-print) -->
@@ -2177,6 +2447,168 @@ select option {
                         </div>
                     </div>
                 </section>
+            </div>
+            </div>
+
+            <!-- Inventory View Container -->
+            <div id="view-inventory" class="tab-content no-print" style="display: none; padding: 24px; overflow-y: auto; height: calc(100vh - 70px);">
+                <!-- Inventory Stats -->
+                <div class="inventory-stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 24px;">
+                    <div class="stats-card" style="background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-md); padding: 20px; display: flex; align-items: center; gap: 16px; box-shadow: var(--shadow-premium);">
+                        <div class="stats-icon-wrapper" style="background: rgba(14, 165, 233, 0.15); color: var(--primary); width: 48px; height: 48px; border-radius: var(--border-radius-sm); display: flex; align-items: center; justify-content: center;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:24px;height:24px;">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                            </svg>
+                        </div>
+                        <div class="stats-info" style="display: flex; flex-direction: column;">
+                            <span class="stats-title" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">إجمالي المنتجات بالمخزن</span>
+                            <span class="stats-number" id="inv-total-products" style="font-size: 20px; font-weight: 700; color: var(--text-primary); font-family: var(--font-en);">0</span>
+                        </div>
+                    </div>
+                    <div class="stats-card" style="background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-md); padding: 20px; display: flex; align-items: center; gap: 16px; box-shadow: var(--shadow-premium);">
+                        <div class="stats-icon-wrapper" style="background: rgba(16, 185, 129, 0.15); color: var(--success); width: 48px; height: 48px; border-radius: var(--border-radius-sm); display: flex; align-items: center; justify-content: center;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:24px;height:24px;">
+                                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                            </svg>
+                        </div>
+                        <div class="stats-info" style="display: flex; flex-direction: column;">
+                            <span class="stats-title" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">إجمالي القطع المتوفرة</span>
+                            <span class="stats-number" id="inv-total-qty" style="font-size: 20px; font-weight: 700; color: var(--text-primary); font-family: var(--font-en);">0</span>
+                        </div>
+                    </div>
+                    <div class="stats-card" style="background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-md); padding: 20px; display: flex; align-items: center; gap: 16px; box-shadow: var(--shadow-premium);">
+                        <div class="stats-icon-wrapper" style="background: rgba(239, 68, 68, 0.15); color: var(--danger); width: 48px; height: 48px; border-radius: var(--border-radius-sm); display: flex; align-items: center; justify-content: center;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:24px;height:24px;">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <line x1="9" y1="9" x2="15" y2="15"></line>
+                                <line x1="15" y1="9" x2="9" y2="15"></line>
+                            </svg>
+                        </div>
+                        <div class="stats-info" style="display: flex; flex-direction: column;">
+                            <span class="stats-title" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">منتجات غير متوفرة (نافدة)</span>
+                            <span class="stats-number" id="inv-out-of-stock" style="font-size: 20px; font-weight: 700; color: var(--text-primary); font-family: var(--font-en);">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Inventory Toolbar -->
+                <div class="inventory-toolbar" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 15px; flex-wrap: wrap;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex: 1; min-width: 300px;">
+                        <div class="search-box" style="padding: 0; flex: 1; border-bottom: none;">
+                            <input type="text" id="search-inventory-input" placeholder="بحث باسم المنتج أو الكود (SKU)..." style="width: 100%; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); font-size: 13px;">
+                        </div>
+                        <select id="filter-inventory-category" style="background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); color: var(--text-primary); padding: 10px 14px; font-family: var(--font-ar); outline: none; font-size: 13px;">
+                            <option value="">جميع التصنيفات</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-secondary" id="btn-add-product">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        إضافة منتج جديد
+                    </button>
+                </div>
+
+                <!-- Inventory Table -->
+                <div class="card" style="overflow: hidden; background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-lg); box-shadow: var(--shadow-premium);">
+                    <div class="card-body" style="padding: 0; overflow-x: auto;">
+                        <table class="form-items-table" style="width: 100%; border-collapse: collapse; text-align: right;">
+                            <thead>
+                                <tr style="border-bottom: 1px solid var(--bg-surface-border); background: rgba(255,255,255,0.02);">
+                                    <th style="padding: 16px; text-align: center; width: 70px;">صورة</th>
+                                    <th style="padding: 16px; text-align: right;">اسم المنتج</th>
+                                    <th style="padding: 16px; text-align: right; width: 140px;">التصنيف</th>
+                                    <th style="padding: 16px; text-align: center; width: 100px;">الكود (SKU)</th>
+                                    <th style="padding: 16px; text-align: center; width: 120px;">السعر (د.ل)</th>
+                                    <th style="padding: 16px; text-align: right; width: 150px;">المقاسات</th>
+                                    <th style="padding: 16px; text-align: center; width: 160px;">الكمية بالمخزن</th>
+                                    <th style="padding: 16px; text-align: center; width: 150px;">إجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody id="inventory-tbody">
+                                <tr>
+                                    <td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">جاري تحميل قائمة المنتجات...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Product Form Modal -->
+            <div id="product-modal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); z-index: 1000; align-items: center; justify-content: center;">
+                <div class="modal-content" style="background: var(--bg-sidebar); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-lg); padding: 24px; max-width: 500px; width: 90%; box-shadow: var(--shadow-premium);">
+                    <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--bg-surface-border); padding-bottom: 15px; margin-bottom: 20px;">
+                        <h3 id="modal-title" style="color: var(--text-primary); font-size: 16px; font-weight: 700;">إضافة منتج جديد للمخزن</h3>
+                        <button type="button" id="btn-close-product-modal" style="background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; line-height: 1;">×</button>
+                    </div>
+                    <form id="product-modal-form" autocomplete="off">
+                        <input type="hidden" id="modal-product-id">
+                        <input type="hidden" id="modal-product-old-category">
+                        
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label for="modal-product-name" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">اسم المنتج <span class="required" style="color: var(--danger);">*</span></label>
+                            <input type="text" id="modal-product-name" placeholder="مثال: بلوزة شتوية صوف" required style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                        </div>
+                        
+                        <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 15px;">
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-category" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">التصنيف <span class="required" style="color: var(--danger);">*</span></label>
+                                <select id="modal-product-category" required style="width: 100%; background: var(--bg-surface); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); color: var(--text-primary); padding: 10px 14px; font-family: var(--font-ar); outline: none;">
+                                    <option value="" disabled selected>اختر التصنيف...</option>
+                                    <option value="ملابس صيفية">ملابس صيفية</option>
+                                    <option value="ملابس بناتي">ملابس بناتي</option>
+                                    <option value="الساعات">الساعات</option>
+                                    <option value="ملابس أطفال">ملابس أطفال</option>
+                                    <option value="custom">تصنيف جديد...</option>
+                                </select>
+                            </div>
+                            <div class="form-group col-6" id="custom-category-group" style="display: none; flex: 1;">
+                                <label for="modal-product-custom-category" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">اسم التصنيف الجديد <span class="required" style="color: var(--danger);">*</span></label>
+                                <input type="text" id="modal-product-custom-category" placeholder="مثال: إكسسوارات" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                        </div>
+                        
+                        <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 15px;">
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-sku" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">الكود (SKU) <span class="required" style="color: var(--danger);">*</span></label>
+                                <input type="text" id="modal-product-sku" placeholder="مثال: 51" required style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-price" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">السعر (د.ل) <span class="required" style="color: var(--danger);">*</span></label>
+                                <input type="number" id="modal-product-price" min="0" step="0.5" placeholder="مثال: 85" required style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                        </div>
+                        
+                        <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 15px;">
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-stock" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">الكمية بالمخزن <span class="required" style="color: var(--danger);">*</span></label>
+                                <input type="number" id="modal-product-stock" min="0" value="10" required style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-sizes" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">المقاسات المتاحة</label>
+                                <input type="text" id="modal-product-sizes" placeholder="مثال: S، M، L أو عام" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                        </div>
+                        
+                        <div class="form-row" style="display: flex; gap: 15px; margin-bottom: 20px;">
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-ezone-id" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">معرف المنتج في Ezone (اختياري)</label>
+                                <input type="text" id="modal-product-ezone-id" placeholder="مثال: 71740" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                            <div class="form-group col-6" style="flex: 1;">
+                                <label for="modal-product-img" style="display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px;">رابط صورة المنتج (اختياري)</label>
+                                <input type="url" id="modal-product-img" placeholder="https://example.com/image.jpg" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); padding: 10px 14px; color: var(--text-primary); font-family: var(--font-ar); outline: none;">
+                            </div>
+                        </div>
+                        
+                        <div style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--bg-surface-border); padding-top: 15px;">
+                            <button type="button" class="btn btn-secondary" id="btn-cancel-product-modal">إلغاء</button>
+                            <button type="submit" class="btn btn-primary">حفظ المنتج</button>
+                        </div>
+                    </form>
+                </div>
             </div>
         </main>
     </div>
@@ -2970,7 +3402,356 @@ document.addEventListener('DOMContentLoaded', () => {
     openSidebarBtn.addEventListener('click', () => {
         sidebar.classList.toggle('collapsed');
     });
+
+    // 12. Tab Navigation
+    const tabBookings = document.getElementById('tab-bookings');
+    const tabInventory = document.getElementById('tab-inventory');
+    const viewBookings = document.getElementById('view-bookings');
+    const viewInventory = document.getElementById('view-inventory');
+
+    tabBookings.addEventListener('click', () => {
+        tabBookings.classList.add('active');
+        tabInventory.classList.remove('active');
+        viewBookings.style.display = 'block';
+        viewInventory.style.display = 'none';
+        tabBookings.style.borderBottomColor = 'var(--primary)';
+        tabInventory.style.borderBottomColor = 'transparent';
+        tabBookings.style.color = 'var(--text-primary)';
+        tabInventory.style.color = 'var(--text-secondary)';
+    });
+
+    tabInventory.addEventListener('click', () => {
+        tabInventory.classList.add('active');
+        tabBookings.classList.remove('active');
+        viewBookings.style.display = 'none';
+        viewInventory.style.display = 'block';
+        tabInventory.style.borderBottomColor = 'var(--primary)';
+        tabBookings.style.borderBottomColor = 'transparent';
+        tabInventory.style.color = 'var(--text-primary)';
+        tabBookings.style.color = 'var(--text-secondary)';
+        
+        // Load products
+        loadAndRenderInventory();
+    });
+
+    // 13. Inventory search & filter bindings
+    const searchInvInput = document.getElementById('search-inventory-input');
+    const filterInvCategory = document.getElementById('filter-inventory-category');
+    
+    searchInvInput.addEventListener('input', renderInventoryTable);
+    filterInvCategory.addEventListener('change', renderInventoryTable);
+
+    // 14. Add Product Button trigger
+    const btnAddProduct = document.getElementById('btn-add-product');
+    btnAddProduct.addEventListener('click', () => {
+        openProductModal();
+    });
+
+    // Modal controls
+    document.getElementById('btn-close-product-modal').addEventListener('click', closeProductModal);
+    document.getElementById('btn-cancel-product-modal').addEventListener('click', closeProductModal);
+    
+    // Category custom field toggle
+    const modalProductCategory = document.getElementById('modal-product-category');
+    const customCategoryGroup = document.getElementById('custom-category-group');
+    const modalCustomCategory = document.getElementById('modal-product-custom-category');
+    
+    modalProductCategory.addEventListener('change', () => {
+        if (modalProductCategory.value === 'custom') {
+            customCategoryGroup.style.display = 'block';
+            modalCustomCategory.setAttribute('required', 'required');
+        } else {
+            customCategoryGroup.style.display = 'none';
+            modalCustomCategory.removeAttribute('required');
+        }
+    });
+
+    // Product Modal form submit
+    document.getElementById('product-modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await saveProductForm();
+    });
 });
+
+// Inventory Helper Functions
+let inventoryProducts = []; // Local cache of inventory products for rendering
+
+async function loadAndRenderInventory() {
+    const tbody = document.getElementById('inventory-tbody');
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">جاري تحميل قائمة المنتجات...</td></tr>';
+    
+    try {
+        await AppState.loadProducts(); // Load fresh copy from Firebase via API
+        inventoryProducts = AppState.products || [];
+        
+        // Populate category options in filter select
+        populateCategoryFilters();
+        
+        // Render
+        renderInventoryTable();
+    } catch (e) {
+        tbody.innerHTML = \`<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--danger);">فشل تحميل المنتجات: \${e.message}</td></tr>\`;
+    }
+}
+
+function populateCategoryFilters() {
+    const filterSelect = document.getElementById('filter-inventory-category');
+    const modalSelect = document.getElementById('modal-product-category');
+    
+    const categories = [...new Set(inventoryProducts.map(p => p.category).filter(Boolean))];
+    
+    // Reset options except the first
+    filterSelect.innerHTML = '<option value="">جميع التصنيفات</option>';
+    
+    categories.forEach(cat => {
+        const opt = document.createElement('option');
+        opt.value = cat;
+        opt.textContent = cat;
+        filterSelect.appendChild(opt);
+    });
+    
+    // For Modal, ensure the categories are listed before the "custom" option
+    // Reset modal categories: keep standard ones, then add loaded custom ones, then "custom" option
+    const standardCategories = ["ملابس صيفية", "ملابس بناتي", "الساعات", "ملابس أطفال"];
+    const allCategories = [...new Set([...standardCategories, ...categories])];
+    
+    modalSelect.innerHTML = '<option value="" disabled selected>اختر التصنيف...</option>';
+    allCategories.forEach(cat => {
+        const opt = document.createElement('option');
+        opt.value = cat;
+        opt.textContent = cat;
+        modalSelect.appendChild(opt);
+    });
+    const customOpt = document.createElement('option');
+    customOpt.value = 'custom';
+    customOpt.textContent = 'تصنيف جديد...';
+    modalSelect.appendChild(customOpt);
+}
+
+function renderInventoryTable() {
+    const tbody = document.getElementById('inventory-tbody');
+    const searchVal = document.getElementById('search-inventory-input').value.trim().toLowerCase();
+    const catVal = document.getElementById('filter-inventory-category').value;
+    
+    tbody.innerHTML = '';
+    
+    // Filter products
+    const filtered = inventoryProducts.filter(p => {
+        const matchesCategory = !catVal || p.category === catVal;
+        const matchesSearch = !searchVal || 
+            (p.name && p.name.toLowerCase().includes(searchVal)) || 
+            (p.sku && String(p.sku).toLowerCase().includes(searchVal));
+        return matchesCategory && matchesSearch;
+    });
+
+    // Update Stats Card
+    document.getElementById('inv-total-products').textContent = inventoryProducts.length;
+    
+    const totalQty = inventoryProducts.reduce((sum, p) => sum + (parseInt(p.stock) || 0), 0);
+    document.getElementById('inv-total-qty').textContent = totalQty;
+    
+    const outOfStockCount = inventoryProducts.filter(p => (parseInt(p.stock) || 0) <= 0).length;
+    document.getElementById('inv-out-of-stock').textContent = outOfStockCount;
+
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-muted);">لا توجد نتائج مطابقة للتصفية.</td></tr>';
+        return;
+    }
+
+    filtered.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--bg-surface-border)';
+        
+        const stockVal = parseInt(p.stock) || 0;
+        let stockText = \`\${stockVal} قطعة\`;
+        let stockClass = 'stock-available';
+        
+        if (stockVal <= 0) {
+            stockText = 'نفد ❌';
+            stockClass = 'stock-empty';
+        } else if (stockVal < 5) {
+            stockText = \`\${stockVal} قطعة (منخفض) ⚠️\`;
+            stockClass = 'stock-low';
+        }
+
+        const imgTag = p.img 
+            ? \`<img src="\${p.img}" style="width: 40px; height: 40px; border-radius: var(--border-radius-sm); object-fit: cover; border: 1px solid var(--bg-surface-border);">\`
+            : \`<div style="width: 40px; height: 40px; border-radius: var(--border-radius-sm); background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 10px;">لا صورة</div>\`;
+
+        tr.innerHTML = \`
+            <td style="padding: 12px; text-align: center; vertical-align: middle;">\${imgTag}</td>
+            <td style="padding: 12px; font-weight: 600; color: var(--text-primary); vertical-align: middle;">\${p.name}</td>
+            <td style="padding: 12px; color: var(--text-secondary); vertical-align: middle;">\${p.category}</td>
+            <td style="padding: 12px; text-align: center; font-family: var(--font-en); vertical-align: middle; color: var(--primary); font-weight: 600;">\${p.sku}</td>
+            <td style="padding: 12px; text-align: center; font-family: var(--font-en); vertical-align: middle; font-weight: bold;">\${p.price} د.ل</td>
+            <td style="padding: 12px; color: var(--text-secondary); vertical-align: middle; font-size: 13px;">\${p.sizes || 'عام'}</td>
+            <td style="padding: 12px; text-align: center; vertical-align: middle;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    <input type="number" class="quick-stock-input" value="\${stockVal}" min="0" style="width: 60px; text-align: center; background: rgba(0,0,0,0.2); border: 1px solid var(--bg-surface-border); border-radius: var(--border-radius-sm); color: var(--text-primary); padding: 4px; font-family: var(--font-en);">
+                    <button type="button" class="quick-save-stock-btn" title="حفظ الكمية السريع" style="background: none; border: none; color: var(--success); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                    </button>
+                </div>
+                <div style="font-size: 10px; margin-top: 4px;" class="\${stockClass}">\${stockText}</div>
+            </td>
+            <td style="padding: 12px; text-align: center; vertical-align: middle;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    <button type="button" class="btn btn-sm btn-primary-outline edit-product-btn" style="padding: 6px 12px; font-size: 12px;">تعديل</button>
+                    <button type="button" class="delete-product-btn" title="حذف المنتج" style="background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; display: flex; align-items: center;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
+                </div>
+            </td>
+        \`;
+
+        // Bind quick stock save
+        const stockInput = tr.querySelector('.quick-stock-input');
+        const saveStockBtn = tr.querySelector('.quick-save-stock-btn');
+        
+        saveStockBtn.addEventListener('click', async () => {
+            const newStock = parseInt(stockInput.value);
+            if (isNaN(newStock) || newStock < 0) {
+                alert('يرجى إدخال كمية صحيحة');
+                return;
+            }
+            saveStockBtn.style.color = 'var(--text-muted)';
+            saveStockBtn.setAttribute('disabled', 'disabled');
+            
+            try {
+                const res = await fetch(\`/api/booking?action=update_stock&id=\${p.key || p.sku}&category=\${encodeURIComponent(p.category)}&stock=\${newStock}\`, {
+                    method: 'POST'
+                });
+                if (res.ok) {
+                    p.stock = String(newStock);
+                    loadAndRenderInventory(); // Reload to refresh autocomplete & lists
+                } else {
+                    throw new Error(await res.text());
+                }
+            } catch (err) {
+                alert('فشل حفظ المخزون: ' + err.message);
+                saveStockBtn.style.color = 'var(--success)';
+                saveStockBtn.removeAttribute('disabled');
+            }
+        });
+
+        // Bind full edit product details
+        tr.querySelector('.edit-product-btn').addEventListener('click', () => {
+            openProductModal(p);
+        });
+
+        // Bind delete product
+        tr.querySelector('.delete-product-btn').addEventListener('click', async () => {
+            if (confirm(\`هل أنت متأكد من حذف المنتج "\${p.name}" نهائياً من المخزن؟\`)) {
+                try {
+                    const res = await fetch(\`/api/booking?action=delete_product&id=\${p.key || p.sku}&category=\${encodeURIComponent(p.category)}\`, {
+                        method: 'POST'
+                    });
+                    if (res.ok) {
+                        loadAndRenderInventory();
+                    } else {
+                        throw new Error(await res.text());
+                    }
+                } catch (err) {
+                    alert('فشل حذف المنتج: ' + err.message);
+                }
+            }
+        });
+
+        tbody.appendChild(tr);
+    });
+}
+
+function openProductModal(prod = null) {
+    const modal = document.getElementById('product-modal');
+    const form = document.getElementById('product-modal-form');
+    const title = document.getElementById('modal-title');
+    
+    form.reset();
+    document.getElementById('custom-category-group').style.display = 'none';
+    document.getElementById('modal-product-custom-category').removeAttribute('required');
+    
+    if (prod) {
+        title.textContent = 'تعديل بيانات المنتج';
+        document.getElementById('modal-product-id').value = prod.key || prod.sku;
+        document.getElementById('modal-product-old-category').value = prod.category;
+        document.getElementById('modal-product-name').value = prod.name;
+        document.getElementById('modal-product-category').value = prod.category;
+        document.getElementById('modal-product-sku').value = prod.sku;
+        document.getElementById('modal-product-price').value = prod.price;
+        document.getElementById('modal-product-stock').value = prod.stock;
+        document.getElementById('modal-product-sizes').value = prod.sizes || '';
+        document.getElementById('modal-product-ezone-id').value = (prod.key && !isNaN(prod.key)) ? prod.key : '';
+        document.getElementById('modal-product-img').value = prod.img || '';
+    } else {
+        title.textContent = 'إضافة منتج جديد للمخزن';
+        document.getElementById('modal-product-id').value = '';
+        document.getElementById('modal-product-old-category').value = '';
+        document.getElementById('modal-product-stock').value = '10';
+        document.getElementById('modal-product-sizes').value = 'عام';
+    }
+    
+    modal.style.display = 'flex';
+}
+
+function closeProductModal() {
+    document.getElementById('product-modal').style.display = 'none';
+}
+
+async function saveProductForm() {
+    const id = document.getElementById('modal-product-id').value;
+    const oldCategory = document.getElementById('modal-product-old-category').value;
+    const name = document.getElementById('modal-product-name').value;
+    const sku = document.getElementById('modal-product-sku').value.trim();
+    const price = document.getElementById('modal-product-price').value;
+    const stock = document.getElementById('modal-product-stock').value;
+    const sizes = document.getElementById('modal-product-sizes').value;
+    const ezoneId = document.getElementById('modal-product-ezone-id').value.trim();
+    const img = document.getElementById('modal-product-img').value;
+
+    let category = document.getElementById('modal-product-category').value;
+    if (category === 'custom') {
+        category = document.getElementById('modal-product-custom-category').value.trim();
+    }
+
+    if (!category) {
+        alert('الرجاء اختيار تصنيف المنتج أو كتابة تصنيف جديد.');
+        return;
+    }
+
+    const payload = {
+        id: id || ezoneId || \`local_\${Date.now()}\`,
+        oldCategory,
+        name,
+        category,
+        sku,
+        price,
+        stock,
+        sizes,
+        img
+    };
+
+    try {
+        const res = await fetch('/api/booking?action=save_product', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+            closeProductModal();
+            loadAndRenderInventory();
+        } else {
+            throw new Error(await res.text());
+        }
+    } catch (e) {
+        alert('فشل حفظ تفاصيل المنتج: ' + e.message);
+    }
+}
 
 </script>
 </body>
