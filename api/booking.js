@@ -561,6 +561,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-height: 0; /* Fix flexbox overflow scrolling */
 }
 
 /* Custom Scrollbar for dark theme components */
