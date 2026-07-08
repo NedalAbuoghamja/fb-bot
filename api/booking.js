@@ -472,6 +472,7 @@ body {
     transition: transform var(--transition-normal);
     position: relative;
     flex-shrink: 0;
+    overflow: hidden;
 }
 
 .sidebar.collapsed {
