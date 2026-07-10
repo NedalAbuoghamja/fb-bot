@@ -462,8 +462,7 @@ body {
 /* Sidebar Styling (History List) */
 .sidebar {
     width: 320px;
-    height: 100%;
-    max-height: 100vh;
+    height: 100vh;
     background-color: var(--bg-sidebar);
     border-left: 1px solid var(--bg-surface-border);
     backdrop-filter: blur(20px);
@@ -488,6 +487,7 @@ body {
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--bg-surface-border);
+    flex-shrink: 0;
 }
 
 .logo-area {
@@ -524,6 +524,7 @@ body {
     padding: 16px 24px;
     position: relative;
     border-bottom: 1px solid var(--bg-surface-border);
+    flex-shrink: 0;
 }
 
 .search-box input {
@@ -557,12 +558,12 @@ body {
 }
 
 .invoice-list {
-    flex: 1;
-    height: 0;
-    overflow-y: scroll;
+    flex: 1 1 0;
+    overflow-y: auto;
     padding: 16px;
-    display: block;
-    min-height: 0; /* Fix flexbox overflow scrolling */
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
 }
 
 /* Custom Scrollbar for dark theme components */
@@ -589,11 +590,11 @@ body {
 
 /* Individual Invoice Item in History Sidebar */
 .history-item {
+    flex-shrink: 0;
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid var(--bg-surface-border);
     border-radius: var(--border-radius-sm);
     padding: 12px;
-    margin-bottom: 12px;
     cursor: pointer;
     transition: all var(--transition-fast);
     position: relative;
@@ -699,6 +700,7 @@ body {
 .sidebar-footer {
     padding: 16px;
     border-top: 1px solid var(--bg-surface-border);
+    flex-shrink: 0;
 }
 
 /* Sidebar Trigger Button */
@@ -1559,6 +1561,7 @@ select option {
 .sidebar-stats {
     padding: 16px 24px;
     border-bottom: 1px solid var(--bg-surface-border);
+    flex-shrink: 0;
 }
 
 .stats-card {
