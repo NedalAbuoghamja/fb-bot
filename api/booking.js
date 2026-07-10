@@ -463,6 +463,7 @@ body {
 .sidebar {
     width: 320px;
     height: 100%;
+    max-height: 100vh;
     background-color: var(--bg-sidebar);
     border-left: 1px solid var(--bg-surface-border);
     backdrop-filter: blur(20px);
@@ -557,25 +558,22 @@ body {
 
 .invoice-list {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: scroll;
     padding: 16px;
     display: block;
     min-height: 0; /* Fix flexbox overflow scrolling */
 }
 
 /* Custom Scrollbar for dark theme components */
-.invoice-list::-webkit-scrollbar,
 .form-panel::-webkit-scrollbar,
 .preview-panel::-webkit-scrollbar {
     width: 6px;
 }
-.invoice-list::-webkit-scrollbar-thumb,
 .form-panel::-webkit-scrollbar-thumb,
 .preview-panel::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.1);
     border-radius: 4px;
 }
-.invoice-list::-webkit-scrollbar-thumb:hover,
 .form-panel::-webkit-scrollbar-thumb:hover,
 .preview-panel::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.2);
