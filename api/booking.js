@@ -3599,6 +3599,13 @@ function renderInventoryTable() {
         return matchesCategory && matchesSearch;
     });
 
+    // Sort products by SKU (ascending)
+    filtered.sort((a, b) => {
+        const skuA = parseInt(a.sku) || 0;
+        const skuB = parseInt(b.sku) || 0;
+        return skuA - skuB;
+    });
+
     // Update Stats Card
     document.getElementById('inv-total-products').textContent = inventoryProducts.length;
     
