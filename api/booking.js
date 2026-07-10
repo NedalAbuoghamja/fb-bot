@@ -559,9 +559,7 @@ body {
     flex: 1;
     overflow-y: auto;
     padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    display: block;
     min-height: 0; /* Fix flexbox overflow scrolling */
 }
 
@@ -580,16 +578,14 @@ body {
 .invoice-list::-webkit-scrollbar-thumb:hover,
 .form-panel::-webkit-scrollbar-thumb:hover,
 .preview-panel::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.2);
 }
 
 .empty-history {
+    color: var(--text-secondary);
     text-align: center;
-    color: var(--text-muted);
-    padding: 40px 20px;
     font-size: 13px;
-    border: 2px dashed rgba(255, 255, 255, 0.04);
-    border-radius: var(--border-radius-sm);
+    margin-top: 20px;
 }
 
 /* Individual Invoice Item in History Sidebar */
@@ -598,6 +594,7 @@ body {
     border: 1px solid var(--bg-surface-border);
     border-radius: var(--border-radius-sm);
     padding: 12px;
+    margin-bottom: 12px;
     cursor: pointer;
     transition: all var(--transition-fast);
     position: relative;
