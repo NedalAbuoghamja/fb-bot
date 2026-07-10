@@ -47,7 +47,7 @@ async function adjustStockInFirebase(itemsWithDeltas) {
         const categories = dbRes.data || {};
         
         for (const item of itemsWithDeltas) {
-            const { sku, delta } = item;
+            const { sku, variantId, delta } = item;
             if (delta === 0) continue;
             
             let foundCat = null;
@@ -99,12 +99,30 @@ async function adjustStockInFirebase(itemsWithDeltas) {
             }
 
             if (foundProduct && foundCat && foundKey) {
+                if (variantId && foundProduct.variants && Array.isArray(foundProduct.variants)) {
+                    const vIndex = foundProduct.variants.findIndex(v => String(v.id) === String(variantId));
+                    if (vIndex !== -1) {
+                        const currentVStock = parseInt(foundProduct.variants[vIndex].stock) || 0;
+                        const newVStock = Math.max(0, currentVStock - delta);
+                        const updateUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(foundCat)}/${foundKey}/variants/${vIndex}/stock.json?auth=${token}`;
+                        await axios.put(updateUrl, JSON.stringify(newVStock));
+                        console.log(`[Stock Sync] Adjusted variant stock for ${foundProduct.name} (SKU: ${sku}, Variant: ${variantId}): ${currentVStock} -> ${newVStock}`);
+                        
+                        // Also update total stock
+                        const currentTotalStock = parseInt(foundProduct.stock) || 0;
+                        const newTotalStock = Math.max(0, currentTotalStock - delta);
+                        const totalUpdateUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(foundCat)}/${foundKey}/stock.json?auth=${token}`;
+                        await axios.put(totalUpdateUrl, JSON.stringify(String(newTotalStock)));
+                        continue;
+                    }
+                }
+                
                 const currentStock = parseInt(foundProduct.stock) || 0;
                 const newStock = Math.max(0, currentStock - delta);
                 
                 const updateUrl = `${FB_DB_URL}/store_master_v5/products/${encodeURIComponent(foundCat)}/${foundKey}/stock.json?auth=${token}`;
                 await axios.put(updateUrl, JSON.stringify(String(newStock)));
-                console.log(`[Stock Sync] Adjusted stock for ${foundProduct.name} (SKU: ${sku}): ${currentStock} -> ${newStock}`);
+                console.log(`[Stock Sync] Adjusted total stock for ${foundProduct.name} (SKU: ${sku}): ${currentStock} -> ${newStock}`);
             }
         }
     } catch (e) {
@@ -227,16 +245,21 @@ module.exports = async (req, res) => {
 
             if (oldInvoice && oldInvoice.status !== 'ملغي' && oldInvoice.items && oldInvoice.items.length > 0) {
                 const deltas = {};
+                const deltaDetails = {};
                 oldInvoice.items.forEach(item => {
                     let sku = item.name;
                     const match = item.name.match(/كود\s+(\d+)/);
                     if (match && match[1]) sku = match[1];
-                    deltas[sku] = (deltas[sku] || 0) - (parseInt(item.qty || item.quantity) || 0);
+                    const vId = item.variantId || '';
+                    const key = `${sku}|${vId}`;
+                    deltas[key] = (deltas[key] || 0) - (parseInt(item.qty || item.quantity) || 0);
+                    deltaDetails[key] = { sku, variantId: vId };
                 });
 
-                const itemsWithDeltas = Object.keys(deltas).map(sku => ({
-                    sku,
-                    delta: deltas[sku]
+                const itemsWithDeltas = Object.keys(deltas).map(key => ({
+                    sku: deltaDetails[key].sku,
+                    variantId: deltaDetails[key].variantId,
+                    delta: deltas[key]
                 }));
 
                 if (itemsWithDeltas.length > 0) {
@@ -2993,7 +3016,7 @@ const shippingRates = {
 };
 
 // Form Row Builder for dynamic products
-function addProductRow(name = '', qty = 1, price = 0) {
+function addProductRow(name = '', qty = 1, price = 0, variantId = null) {
     const tbody = document.getElementById('form-items-tbody');
     const tr = document.createElement('tr');
     tr.className = 'form-item-row';
@@ -3054,7 +3077,7 @@ function addProductRow(name = '', qty = 1, price = 0) {
     };
 
     if (name) {
-        showStockHelperForValue(name);
+        showStockHelperForValue(name, variantId);
     }
 
     const updateRowTotal = () => {
@@ -3377,11 +3400,21 @@ document.addEventListener('DOMContentLoaded', () => {
         // Items collection
         const items = [];
         document.querySelectorAll('#form-items-tbody tr').forEach(row => {
-            const name = row.querySelector('.form-item-name').value;
+            let name = row.querySelector('.form-item-name').value;
             const qty = parseFloat(row.querySelector('.form-item-qty').value) || 0;
             const price = parseFloat(row.querySelector('.form-item-price').value) || 0;
+            
+            const variantContainer = row.querySelector('.form-item-variant-container');
+            const variantSelect = row.querySelector('.form-item-variant-select');
+            let variantId = null;
+            if (variantContainer && variantContainer.style.display !== 'none' && variantSelect) {
+                variantId = variantSelect.value;
+                const vText = variantSelect.options[variantSelect.selectedIndex]?.text.split('(')[0].trim();
+                if (vText && !name.includes(vText)) name = name + ' - ' + vText;
+            }
+            
             if (name) {
-                items.push({ name, qty, price });
+                items.push({ name, qty, price, variantId });
             }
         });
 
