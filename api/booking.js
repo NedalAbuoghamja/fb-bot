@@ -558,7 +558,9 @@ body {
 }
 
 .invoice-list {
-    flex: 1 1 0;
+    flex: 1 1 100%;
+    height: 100%;
+    min-height: 0;
     overflow-y: auto;
     padding: 16px;
     display: flex;
